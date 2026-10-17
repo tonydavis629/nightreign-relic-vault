@@ -31,7 +31,7 @@ leaves your PC: the server only answers on localhost.
 - Duplicate and outclassed relics are flagged, with a side-by-side "keep this one" comparison.
 - NEW badges mark relics gained since your last visit.
 - **Combo Finder**: pick a Nightfarer, vessels and effects to get the 50 best loadouts.
-  - Per-effect min/max stacks (required or excluded) and priority.
+  - Per-effect min/max stacks (required or excluded) and a priority rank from 1 to 12.
   - Curse penalty.
   - Goal checklist on each result.
   - Saved builds.

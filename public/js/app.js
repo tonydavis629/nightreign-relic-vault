@@ -3,6 +3,7 @@ import { buildSearch } from "./combo-core.js";
 import { SearchCancelled, cancelSearch, searchCombos } from "./combo-client.js";
 import { Color, EffectType, ItemType, RELIC_COLORS, createGameData, isSameGroup, isSameGroupAndEqualOrBetter, relicEffectCount, relicHasEffect } from "./game-data.js";
 import { availableEffects as computeAvailableEffects, buildCharacter } from "./model.js";
+import { DEFAULT_RANK, MAX_RANK, clampRank, rankLabel, rankOf, weightForRank } from "./priority.js";
 import { SaveParseError, parseSave } from "./save-parser.js";
 import { $, banner, colorChip, effectPicker, esc, relicCard, timeAgo, toast } from "./ui.js";
 
@@ -36,9 +37,7 @@ const COLOR_FILTERS = [
 const ALWAYS_SELECTABLE = new Set(["improvedPoiseNearTotemStela", "defeatingEnemiesNearTotemStelaRestoresHP"]);
 
 // Optimizer knobs layered on top of upstream's scoring
-const PRIORITY = { high: { weight: 2, label: "High" }, normal: { weight: 1, label: "Normal" }, low: { weight: 0.5, label: "Low" } };
 const CURSE_PENALTY = { off: { value: 0, label: "Ignore" }, light: { value: 0.15, label: "Light" }, strong: { value: 0.4, label: "Strong" } };
-const priorityOf = (entry) => Object.keys(PRIORITY).find((p) => PRIORITY[p].weight === (entry.weight ?? 1)) ?? "normal";
 
 const state = {
   gd: null,
@@ -372,6 +371,10 @@ function comboSettings(nf = state.combo.nightfarer) {
   s.cursePenalty ??= "light";
   // Drop entries whose effect no longer exists in the data
   s.selectedEffects = s.selectedEffects.filter((e) => state.gd.effectByKey(e.effectKey) && !state.gd.effectByKey(e.effectKey).unknown);
+  for (const e of s.selectedEffects) {
+    e.rank = rankOf(e);
+    e.weight = weightForRank(e.rank);
+  }
   return s;
 }
 function saveComboSettings() {
@@ -460,7 +463,8 @@ function loadBuild(id) {
   for (const e of build.effects) {
     const effect = bySlug.get(e.slug);
     if (!effect) { missing.push(e.slug); continue; }
-    entries.push({ effectKey: effect.key, minStacks: e.min ?? 0, maxStacks: e.max ?? (effect.stacks ? 10 : 1), weight: PRIORITY[e.priority]?.weight ?? 1 });
+    const rank = rankOf(e);
+    entries.push({ effectKey: effect.key, minStacks: e.min ?? 0, maxStacks: e.max ?? (effect.stacks ? 10 : 1), rank, weight: weightForRank(rank) });
   }
   state.combo.nightfarer = build.nightfarer;
   const s = comboSettings();
@@ -485,14 +489,13 @@ function confirmSaveBuild() {
   const name = $("[data-build-name]")?.value.trim();
   if (!name) return $("[data-build-name]")?.focus();
   const s = comboSettings();
-  const priorityName = (w) => Object.keys(PRIORITY).find((k) => PRIORITY[k].weight === w) ?? "normal";
   const build = {
     id: `user-${Date.now().toString(36)}`,
     name,
     nightfarer: state.combo.nightfarer,
     excludeDeepEffects: s.excludeDeepEffects,
     cursePenalty: s.cursePenalty,
-    effects: s.selectedEffects.map((e) => ({ slug: state.gd.effectByKey(e.effectKey).slug, min: e.minStacks, max: e.maxStacks, priority: priorityName(e.weight ?? 1) })),
+    effects: s.selectedEffects.map((e) => ({ slug: state.gd.effectByKey(e.effectKey).slug, min: e.minStacks, max: e.maxStacks, priority: e.rank })),
   };
   store.set("builds", [...userBuilds(), build]);
   state.combo.savingBuild = false;
@@ -519,7 +522,7 @@ function addEffect(effect) {
     if (e.startingBonus !== undefined && e.startingBonus === effect.startingBonus) return false;
     return true;
   });
-  s.selectedEffects.push({ effectKey: effect.key, minStacks: 0, maxStacks: effect.stacks ? 10 : 1, weight: 1 });
+  s.selectedEffects.push({ effectKey: effect.key, minStacks: 0, maxStacks: effect.stacks ? 10 : 1, rank: DEFAULT_RANK, weight: weightForRank(DEFAULT_RANK) });
   comboChanged();
   $("#combo-picker input")?.focus(); // keep typing to add more
 }
@@ -610,7 +613,7 @@ function renderCombo() {
         <span>Curses</span>
         <div class="segmented small">${Object.entries(CURSE_PENALTY).map(([k, v]) => `<button type="button" data-curse="${k}" aria-pressed="${s.cursePenalty === k}">${v.label}</button>`).join("")}</div>
       </div>
-      <ul class="picked">${s.selectedEffects.map((entry) => pickedEffectRow(entry)).join("")}</ul>
+      <ul class="picked">${[...s.selectedEffects].sort((a, b) => a.rank - b.rank).map((entry) => pickedEffectRow(entry)).join("")}</ul>
       ${s.selectedEffects.length === 0 ? `<p class="muted" style="margin-top:14px">Pick the effects you want. Only effects that exist on ${esc(character().name)}'s relics are listed. Stackable effects match "this level or better".</p>` : ""}
     </section>
     <section class="results" id="combo-results"></section>
@@ -636,7 +639,7 @@ function pickedEffectRow(entry) {
     : `Stacks: <b>${lo === hi ? lo : `${lo} – ${hi}`}</b> <span class="muted">(you can reach ${max})</span>`;
   return `<li data-entry="${e.key}">
     <div class="row"><span class="name ${e.type === EffectType.Debuff ? "curse" : ""}">${esc(effectLabel(e))}</span><button class="icon-btn" data-remove="${e.key}" aria-label="Remove ${esc(e.name)}">✕</button></div>
-    ${hi === 0 && entry.maxStacks === 0 ? "" : `<div class="opt-row"><span>Priority</span><div class="segmented small">${Object.entries(PRIORITY).map(([k, v]) => `<button type="button" data-priority="${k}" aria-pressed="${priorityOf(entry) === k}">${v.label}</button>`).join("")}</div>${lo > 0 ? '<span class="must">Required</span>' : ""}</div>`}
+    ${hi === 0 && entry.maxStacks === 0 ? "" : priorityRow(entry, lo > 0)}
     <div class="dual-range" style="--max:${max}">
       <div class="track"></div>
       <div class="fill" style="left:calc(8px + (100% - 16px) * ${pct(lo) / 100});width:calc((100% - 16px) * ${(pct(hi) - pct(lo)) / 100})"></div>
@@ -646,6 +649,19 @@ function pickedEffectRow(entry) {
     </div>
     <div class="range-label">${desc}</div>
   </li>`;
+}
+
+function priorityRow(entry, required) {
+  const rank = entry.rank;
+  const options = Array.from({ length: MAX_RANK }, (_, i) => i + 1)
+    .map((r) => `<option value="${r}" ${r === rank ? "selected" : ""}>${rankLabel(r)}</option>`).join("");
+  const pips = Array.from({ length: MAX_RANK }, (_, i) => `<i class="${i < MAX_RANK + 1 - rank ? "on" : ""}"></i>`).join("");
+  return `<div class="opt-row">
+    <span>Priority</span>
+    <select class="rank-select" data-rank aria-label="Priority rank, 1 is most important">${options}</select>
+    <span class="pips" title="Scores ×${weightForRank(rank)} (rank 1 ×3 … rank 12 ×0.25)">${pips}</span>
+    ${required ? '<span class="must">Required</span>' : ""}
+  </div>`;
 }
 
 function renderComboResults() {
@@ -741,6 +757,13 @@ function wireGlobalEvents() {
       return renderBrowseGrid();
     }
     if (t.matches("[data-build-select]")) return t.value ? loadBuild(t.value) : undefined;
+    if (t.matches("[data-rank]")) {
+      const key = Number(t.closest("[data-entry]").dataset.entry);
+      const entry = comboSettings().selectedEffects.find((e) => e.effectKey === key);
+      entry.rank = clampRank(t.value);
+      entry.weight = weightForRank(entry.rank);
+      return comboChanged();
+    }
     if (t.name === "nf") {
       state.combo.nightfarer = Number(t.value);
       state.combo.loadedBuild = null;
@@ -807,11 +830,6 @@ function wireGlobalEvents() {
     if (t.dataset.remove) {
       const s = comboSettings();
       s.selectedEffects = s.selectedEffects.filter((e) => e.effectKey !== Number(t.dataset.remove));
-      return comboChanged();
-    }
-    if (t.dataset.priority) {
-      const key = Number(t.closest("[data-entry]").dataset.entry);
-      comboSettings().selectedEffects.find((e) => e.effectKey === key).weight = PRIORITY[t.dataset.priority].weight;
       return comboChanged();
     }
     if (t.dataset.curse) { comboSettings().cursePenalty = t.dataset.curse; return comboChanged(); }
