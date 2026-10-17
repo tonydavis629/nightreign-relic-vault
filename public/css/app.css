@@ -1,6 +1,6 @@
 /* Relic Vault — minimal dark UI with gratuitous late-90s fantasy trim.
    Base: clean grid, warm neutrals, one gold accent.
-   Trim: RuneScape stone bevels + chatbox, Souls/Elden serif banners, 90s web badges. */
+   Trim: RuneScape stone bevels + chatbox, Souls/Elden serif banners. */
 
 :root {
   color-scheme: dark;
@@ -388,23 +388,6 @@ mark { background: #ffd700; color: #000; border-radius: 2px; padding: 0 1px; }
 
 .drop-overlay { position: fixed; inset: 0; background: rgba(9, 9, 11, 0.86); z-index: 60; display: flex; align-items: center; justify-content: center; pointer-events: none; }
 .drop-overlay > div { padding: 40px 60px; font-family: var(--serif); font-size: 20px; color: var(--gold-hi); }
-
-/* ---------- 90s footer ---------- */
-.footer { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 8px; padding: 14px 20px 18px; border-top: 1px solid var(--line); color: var(--faint); font-size: 11px; }
-.badge88 {
-  display: inline-flex; flex-direction: column; justify-content: center; width: 88px; height: 31px; padding: 0 4px; text-align: center;
-  font: bold 9px/1.1 var(--rs); text-transform: uppercase; letter-spacing: 0.02em; color: #fff; text-shadow: 1px 1px 0 #000;
-  border: 1px solid; border-color: #888 #222 #222 #888;
-}
-.badge88 small { font-size: 7.5px; font-weight: normal; opacity: 0.85; }
-.badge88.b1 { background: linear-gradient(180deg, #2f6b2f, #133d13); }
-.badge88.b2 { background: linear-gradient(180deg, #3b3b8f, #16163f); }
-.badge88.b3 { background: linear-gradient(180deg, #7a4b14, #3a2208); }
-.badge88.b4 { background: repeating-linear-gradient(45deg, #ffcc00 0 6px, #111 6px 12px); }
-.badge88.b4 span { background: #111; color: #ffcc00; padding: 1px 3px; }
-.counter { display: inline-flex; align-items: center; gap: 6px; margin-left: 8px; }
-.counter .digits { display: inline-flex; gap: 1px; }
-.counter .digits span { display: inline-block; width: 12px; height: 18px; line-height: 18px; text-align: center; font: bold 13px var(--mono); color: #39ff14; background: #000; border: 1px solid #333; text-shadow: 0 0 4px #39ff14; }
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }

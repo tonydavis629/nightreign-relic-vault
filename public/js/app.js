@@ -235,7 +235,6 @@ const safetyNote = () => `<div class="safety stone">
 
 function renderAll() {
   $("#tabs").hidden = false;
-  $("#relic-counter").innerHTML = String(character().relics.length).padStart(6, "0").split("").map((d) => `<span>${d}</span>`).join("");
   renderCharacterPicker();
   renderStatus();
   renderTabs();
