@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Relic Vault</title>
+    <meta name="description" content="Browse, search and optimize your Elden Ring Nightreign relics from your save file — locally, read-only." />
+    <link rel="icon" href="favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="css/app.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <img src="favicon.svg" alt="" width="22" height="22" />
+        <span>Relic Vault</span>
+      </div>
+      <div id="character-picker" class="character-picker" hidden></div>
+      <div class="topbar-right">
+        <div id="save-status" class="save-status" role="status" aria-live="polite"></div>
+        <label class="btn" title="Open an .sl2 save file from anywhere">
+          <input id="file-input" type="file" accept=".sl2,.bak,application/octet-stream" hidden />
+          Open save…
+        </label>
+      </div>
+    </header>
+
+    <nav id="tabs" class="tabs" role="tablist" hidden>
+      <button role="tab" data-tab="relics" aria-selected="true">⚔ Relics</button>
+      <button role="tab" data-tab="combo" aria-selected="false">✦ Combo Finder</button>
+    </nav>
+
+    <main id="app">
+      <section class="welcome">
+        <h1>Your relics, outside the game</h1>
+        <p class="lede">Looking for your Nightreign save…</p>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <span class="badge88 b1">Read-only<small>save never written</small></span>
+      <span class="badge88 b2">Localhost<small>no uploads</small></span>
+      <span class="badge88 b3">Powered by<small>Node.js</small></span>
+      <span class="badge88 b4"><span>No anti-cheat</span><small><span>was harmed</span></small></span>
+      <span class="counter" title="Relics on this character">Relics hoarded: <span class="digits" id="relic-counter"><span>0</span><span>0</span><span>0</span><span>0</span><span>0</span><span>0</span></span></span>
+    </footer>
+
+    <div id="drop-overlay" class="drop-overlay" hidden><div class="stone">Drop your <code>NR0000.sl2</code> to load it</div></div>
+    <div id="toast" class="chatbox" role="log" aria-live="polite" hidden></div>
+    <div id="banner" class="banner" aria-hidden="true"><span></span></div>
+
+    <dialog id="compare-dialog" class="compare-dialog stone">
+      <form method="dialog">
+        <header>
+          <h2>Relic comparison</h2>
+          <button class="icon-btn" aria-label="Close" value="close">✕</button>
+        </header>
+        <p id="compare-reason"></p>
+        <div id="compare-body" class="compare-body"></div>
+      </form>
+    </dialog>
+
+    <script type="module" src="js/app.js"></script>
+  </body>
+</html>

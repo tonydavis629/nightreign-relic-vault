@@ -1,0 +1,89 @@
+[
+  {
+    "id": "scholar-ult-spam-dex",
+    "name": "Scholar · Ult spam, ally buff, physical, Dex respec, affliction",
+    "nightfarer": 8,
+    "excludeDeepEffects": false,
+    "cursePenalty": "strong",
+    "effects": [
+      {
+        "slug": "defeatingEnemiesFillsMoreOfTheArtGauge",
+        "min": 1,
+        "max": 1,
+        "priority": "high"
+      },
+      {
+        "slug": "defeatingEnemiesFillsMoreOfTheArtGaugePlus1",
+        "min": 1,
+        "max": 1,
+        "priority": "high"
+      },
+      {
+        "slug": "physicalAttackUp",
+        "min": 1,
+        "max": 10,
+        "priority": "high"
+      },
+      {
+        "slug": "scholarImprovedEnduranceAndDexterityReducedIntelligenceAndArcane",
+        "min": 1,
+        "max": 1,
+        "priority": "normal"
+      },
+      {
+        "slug": "scholarContinuousDamageInflictedOnTargetsThreadedByUltimateArt",
+        "min": 1,
+        "max": 1,
+        "priority": "normal"
+      },
+      {
+        "slug": "itemsConferEffectToAllNearbyAllies",
+        "min": 1,
+        "max": 1,
+        "priority": "normal"
+      },
+      {
+        "slug": "scholarAlliesTargetedByCharacterSkillGainBoostedAttack",
+        "min": 1,
+        "max": 1,
+        "priority": "normal"
+      },
+      {
+        "slug": "ultimateArtAutoChargePlus1",
+        "min": 0,
+        "max": 10,
+        "priority": "low"
+      },
+      {
+        "slug": "startingArmamentInflictsBloodLoss",
+        "min": 0,
+        "max": 1,
+        "priority": "high"
+      },
+      {
+        "slug": "startingArmamentInflictsFrost",
+        "min": 0,
+        "max": 1,
+        "priority": "high"
+      },
+      {
+        "slug": "startingArmamentInflictsPoison",
+        "min": 0,
+        "max": 1,
+        "priority": "high"
+      },
+      {
+        "slug": "smallPouchInPossessionAtStartOfExpedition",
+        "min": 0,
+        "max": 10,
+        "priority": "normal"
+      },
+      {
+        "slug": "ultimateArtChargingImpaired",
+        "min": 0,
+        "max": 0,
+        "priority": "normal"
+      }
+    ]
+  }
+]

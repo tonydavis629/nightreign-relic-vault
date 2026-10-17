@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">
+  <!-- blade: tip at the hotspot (1,1) -->
+  <path d="M1 1 L15.5 13 L13 15.5 Z" fill="#ece7d6" stroke="#000" stroke-width="1" stroke-linejoin="round"/>
+  <path d="M1 1 L14.2 14.2 L13 15.5 Z" fill="#a9a290"/>
+  <!-- crossguard -->
+  <path d="M10.5 17.5 L17.5 10.5 L19 12 L12 19 Z" fill="#d8b46a" stroke="#000" stroke-width="1" stroke-linejoin="round"/>
+  <!-- grip -->
+  <path d="M15 16.5 L16.5 15 L20.5 19 L19 20.5 Z" fill="#6b4420" stroke="#000" stroke-width="1" stroke-linejoin="round"/>
+  <!-- pommel -->
+  <circle cx="21" cy="21" r="1.8" fill="#d8b46a" stroke="#000" stroke-width="1"/>
+</svg>

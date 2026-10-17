@@ -1,0 +1,7 @@
+node_modules/
+*.log
+.DS_Store
+# never commit personal saves; only the upstream test fixtures
+*.sl2
+*.sl2.bak
+!test/fixtures/*.sl2

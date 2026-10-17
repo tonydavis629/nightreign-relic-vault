@@ -1,0 +1,14 @@
+{
+  "name": "nightreign-relic-vault",
+  "version": "1.0.0",
+  "description": "Browse, search and optimize your Elden Ring Nightreign relics from your save file, locally and read-only.",
+  "type": "module",
+  "private": true,
+  "license": "MIT",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "start": "node server.mjs",
+    "test": "node --test \"test/*.test.mjs\"",
+    "update-data": "node scripts/update-data.mjs"
+  }
+}
