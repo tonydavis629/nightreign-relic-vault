@@ -395,14 +395,25 @@ const enabledVessels = () => {
 const orBetter = (e) => e.stacks && !e.maxLevel;
 const effectLabel = (e) => `${e.name}${orBetter(e) ? " (or better)" : ""}`;
 
+/**
+ * Every effect this Nightfarer can use: their own effects first, then A-Z with MMV-only ones last. Effects in none of
+ * the character's relics are listed too (dimmed by the picker). MMV-only effects are offered
+ * on modded saves, or when a relic has one.
+ */
 function selectableEffects() {
   const nf = state.combo.nightfarer;
   const exclude = comboSettings().excludeDeepEffects;
-  return availableEffects(character()).filter((e) =>
-    !e.unknown &&
-    (e.nightfarer === undefined || e.nightfarer === nf || ALWAYS_SELECTABLE.has(e.slug)) &&
-    (!exclude || e.type !== EffectType.Debuff));
+  const have = new Set(availableEffects(character()));
+  const modded = /\.co2$/i.test(state.fileName ?? "");
+  return state.gd.effectsByKey
+    .filter((e) =>
+      e && !e.unknown &&
+      (!e.mmv || modded || have.has(e)) &&
+      (e.nightfarer === undefined || e.nightfarer === nf || ALWAYS_SELECTABLE.has(e.slug)) &&
+      (!exclude || e.type !== EffectType.Debuff))
+    .sort((a, b) => (b.nightfarer === nf) - (a.nightfarer === nf) || Boolean(a.mmv) - Boolean(b.mmv) || a.name.localeCompare(b.name, undefined, { numeric: true }));
 }
+const notInRelicsHint = (e) => (availableEffects(character()).includes(e) ? "" : "not in your relics");
 
 /** Most copies of `effect` that one enabled vessel could hold with this character's relics. */
 function maxStacksFor(effect) {
@@ -433,11 +444,13 @@ function maxStacksFor(effect) {
 }
 
 // ---------------------------------------------------------------------------
-// Builds: named Combo Finder setups. Built-ins ship in data/presets.json; your own are
-// kept in this browser. Effects are stored by name (slug) so they survive data updates.
+// Builds: named Combo Finder setups, from data/presets.json plus the ones saved in this
+// browser, shown as one list. Effects are stored by name (slug) so they survive data updates.
+// The server never writes files, so deleting a presets.json build just hides it here.
 // ---------------------------------------------------------------------------
 const userBuilds = () => store.get("builds", []);
-const allBuilds = () => [...(state.presets ?? []).map((b) => ({ ...b, builtIn: true })), ...userBuilds()];
+const hiddenPresets = () => store.get("builds.hidden", []);
+const allBuilds = () => [...(state.presets ?? []).filter((b) => !hiddenPresets().includes(b.id)).map((b) => ({ ...b, fromFile: true })), ...userBuilds()];
 
 function buildsBar() {
   if (state.combo.savingBuild) {
@@ -447,15 +460,13 @@ function buildsBar() {
   const builds = allBuilds();
   const loaded = builds.find((b) => b.id === state.combo.loadedBuild);
   const opt = (b) => `<option value="${esc(b.id)}" ${b.id === state.combo.loadedBuild ? "selected" : ""}>${esc(b.name)}</option>`;
-  const builtIn = builds.filter((b) => b.builtIn), mine = builds.filter((b) => !b.builtIn);
   return `<div class="builds">
     <select data-build-select aria-label="Load a build">
-      <option value="">Load a build…</option>
-      ${builtIn.length ? `<optgroup label="Built-in">${builtIn.map(opt).join("")}</optgroup>` : ""}
-      ${mine.length ? `<optgroup label="Saved">${mine.map(opt).join("")}</optgroup>` : ""}
+      <option value="">${builds.length ? "Load a build…" : "No saved builds yet"}</option>
+      ${builds.map(opt).join("")}
     </select>
     <button class="btn" data-build="save" title="Save the current Nightfarer, effects, priorities and curse setting">Save…</button>
-    ${loaded && !loaded.builtIn ? `<button class="btn btn-ghost" data-build="delete" title="Delete this saved build">Delete</button>` : ""}
+    ${loaded ? `<button class="btn btn-ghost" data-build="delete" title="Delete this saved build">Delete</button>` : ""}
   </div>`;
 }
 
@@ -512,6 +523,7 @@ function confirmSaveBuild() {
 function deleteBuild() {
   const id = state.combo.loadedBuild;
   store.set("builds", userBuilds().filter((b) => b.id !== id));
+  if ((state.presets ?? []).some((b) => b.id === id)) store.set("builds.hidden", [...hiddenPresets(), id]);
   state.combo.loadedBuild = null;
   renderCombo();
 }
@@ -628,6 +640,7 @@ function renderCombo() {
     placeholder: "Search effects…",
     getOptions: selectableEffects,
     label: effectLabel,
+    hint: notInRelicsHint,
     clearOnPick: true,
     onPick: addEffect,
   });

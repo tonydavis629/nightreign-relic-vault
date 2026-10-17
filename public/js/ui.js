@@ -63,7 +63,7 @@ export function relicCard(relic, { search = "", byColor = false, highlighted = n
  * Autocomplete over effects. Calls onPick(effect) when an option is chosen and
  * onInput(text) on every keystroke (for free-text search).
  */
-export function effectPicker(container, { placeholder, getOptions, label = (e) => e.name, onPick, onInput, clearOnPick = false }) {
+export function effectPicker(container, { placeholder, getOptions, label = (e) => e.name, hint = () => "", onPick, onInput, clearOnPick = false }) {
   container.classList.add("search");
   container.innerHTML = `<input type="search" autocomplete="off" spellcheck="false" placeholder="${esc(placeholder)}" aria-autocomplete="list" role="combobox" aria-expanded="false" />
     <ul class="suggestions" role="listbox" hidden></ul>`;
@@ -74,10 +74,13 @@ export function effectPicker(container, { placeholder, getOptions, label = (e) =
   const close = () => { list.hidden = true; input.setAttribute("aria-expanded", "false"); active = -1; };
   const render = () => {
     const q = input.value.trim().toLowerCase();
-    options = getOptions().filter((e) => !q || label(e).toLowerCase().includes(q)).slice(0, 80);
+    options = getOptions().filter((e) => !q || label(e).toLowerCase().includes(q));
     if (options.length === 0 || document.activeElement !== input) return close();
     list.innerHTML = options
-      .map((e, i) => `<li role="option" data-i="${i}" class="${e.type === EffectType.Debuff ? "curse" : ""}" aria-selected="${i === active}">${highlight(label(e), q)}</li>`)
+      .map((e, i) => {
+        const note = hint(e);
+        return `<li role="option" data-i="${i}" class="${e.type === EffectType.Debuff ? "curse" : ""} ${note ? "dim" : ""}" aria-selected="${i === active}">${highlight(label(e), q)}${note ? `<span class="hint">${esc(note)}</span>` : ""}</li>`;
+      })
       .join("");
     list.hidden = false;
     input.setAttribute("aria-expanded", "true");
