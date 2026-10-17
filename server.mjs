@@ -10,6 +10,8 @@
 //   * never touches the game process or its memory; no network access beyond this socket
 //
 //   node server.mjs [--port 5177] [--save "C:\path\NR0000.sl2"] [--no-open]
+//
+// Modded alt saves (*.co2, e.g. More Map Variations via ME3) are the same format and are listed too.
 
 import { createReadStream } from "node:fs";
 import { readdir, readFile, stat } from "node:fs/promises";
@@ -51,18 +53,27 @@ function saveRoot() {
   return join(appData, "Nightreign");
 }
 
-/** Returns [{ id, label, path, size, mtimeMs }] for every NR0000.sl2 found (plus --save). */
+/**
+ * Returns [{ id, label, path, size, mtimeMs }] for every NR0000.sl2 found, plus the .co2 alt saves
+ * that mod loaders (ME3 profiles such as More Map Variations) keep next to it, plus --save.
+ */
 async function discoverSaves() {
   const found = [];
+  const add = async (id, label, path) => {
+    try {
+      const s = await stat(path);
+      if (s.isFile()) found.push({ id, label, path, size: s.size, mtimeMs: s.mtimeMs });
+    } catch {
+      // no such save
+    }
+  };
   try {
     for (const dirent of await readdir(saveRoot(), { withFileTypes: true })) {
       if (!dirent.isDirectory()) continue;
-      const path = join(saveRoot(), dirent.name, "NR0000.sl2");
-      try {
-        const s = await stat(path);
-        if (s.isFile()) found.push({ id: dirent.name, label: `Steam ${dirent.name}`, path, size: s.size, mtimeMs: s.mtimeMs });
-      } catch {
-        // no save in this folder
+      const dir = join(saveRoot(), dirent.name);
+      await add(dirent.name, "Normal game (NR0000.sl2)", join(dir, "NR0000.sl2"));
+      for (const name of await readdir(dir).catch(() => [])) {
+        if (extname(name).toLowerCase() === ".co2") await add(`${dirent.name}~${name}`, `Modded (${name})`, join(dir, name));
       }
     }
   } catch {

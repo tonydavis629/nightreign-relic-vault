@@ -11,13 +11,25 @@ export const EffectType = Object.freeze({ Buff: 0, Debuff: 1 });
  * Turns the raw JSON into fast lookup tables.
  * Effects are interned: one object per effect key, so identity comparison == key comparison.
  */
-export function createGameData(json) {
+export function createGameData(json, mmv = null) {
   const effectsByKey = [];
   for (const def of Object.values(json.effects)) effectsByKey[def.key] = Object.freeze({ ...def });
   const knownEffectCount = effectsByKey.length;
 
   const effectsById = new Map();
   for (const [id, key] of Object.entries(json.effectIdToKey)) effectsById.set(Number(id), effectsByKey[key]);
+
+  // Effects only the More Map Variations mod has (data/mmv-names.json). Their stacking rules
+  // aren't known, so they count once per vessel. Keys follow id order so saved builds stay valid.
+  const nightfarerIds = new Map(json.nightfarers.map((nf) => [nf.name.toLowerCase(), nf.id]));
+  for (const [id, name] of Object.entries(mmv?.effects ?? {}).sort(([a], [b]) => a - b)) {
+    if (effectsById.has(Number(id))) continue;
+    const nf = nightfarerIds.get(name.match(/^\[(\w+)\]/)?.[1].toLowerCase());
+    const def = Object.freeze({ key: effectsByKey.length, slug: `mmv${id}`, name: `${name} (MMV)`, ...(nf !== undefined && { nightfarer: nf }), stacks: false, maxLevel: true, mmv: true });
+    effectsByKey.push(def);
+    effectsById.set(Number(id), def);
+  }
+  const mmvItemNames = mmv?.items ?? {};
 
   const items = new Map();
   for (const [id, item] of Object.entries(json.items)) items.set(Number(id), Object.freeze({ id: Number(id), ...item }));
@@ -44,7 +56,8 @@ export function createGameData(json) {
     let placeholder = unknownItems.get(id);
     if (!placeholder) {
       // Same fallback as upstream: treat unknown relics as red, normal relics
-      placeholder = Object.freeze({ id, key: `unknown${id}`, name: `Unknown relic #${id}`, color: Color.Red, type: ItemType.Relic, unknown: true });
+      const name = mmvItemNames[id] ? `${mmvItemNames[id]} (MMV)` : `Unknown relic #${id}`;
+      placeholder = Object.freeze({ id, key: `unknown${id}`, name, color: Color.Red, type: ItemType.Relic, unknown: true });
       unknownItems.set(id, placeholder);
     }
     return placeholder;

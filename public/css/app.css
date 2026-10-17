@@ -103,6 +103,7 @@ code { font-family: var(--mono); font-size: 0.9em; background: var(--surface-3);
 
 /* Live indicator: a Site of Grace flame */
 .save-status { display: flex; align-items: center; gap: 9px; color: var(--muted); font-size: 13px; white-space: nowrap; }
+.save-status select { background: var(--surface-2); border: 1px solid var(--line-2); border-radius: 6px; padding: 4px 8px; color: var(--text); }
 .save-status .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--faint); }
 .save-status.live .dot {
   width: 10px; height: 15px; border-radius: 50% 50% 45% 45% / 65% 65% 35% 35%;

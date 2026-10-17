@@ -73,7 +73,9 @@ const availableEffects = (c) => {
 // ---------------------------------------------------------------------------
 async function boot() {
   try {
-    state.gd = createGameData(await (await fetch("data/game-data.json")).json());
+    // Optional overlay with names for effects only the More Map Variations mod has
+    const mmv = await fetch("data/mmv-names.json").then((r) => (r.ok ? r.json() : null), () => null);
+    state.gd = createGameData(await (await fetch("data/game-data.json")).json(), mmv);
     state.presets = await fetch("data/presets.json").then((r) => (r.ok ? r.json() : []), () => []);
   } catch (err) {
     return showFatal(`Could not load game data (data/game-data.json): ${err.message}`);
@@ -106,7 +108,7 @@ async function loadLive(id, { announce = false } = {}) {
       const res = await fetch(`api/saves/${encodeURIComponent(id)}/file`, { cache: "no-store" });
       if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error ?? `HTTP ${res.status}`);
       const buf = await res.arrayBuffer();
-      await applySave(buf, { source: "live", saveId: id, fileName: "NR0000.sl2", mtimeMs: Number(res.headers.get("X-Save-Mtime")) || Date.now(), announce });
+      await applySave(buf, { source: "live", saveId: id, fileName: save.path.split(/[\/]/).pop(), mtimeMs: Number(res.headers.get("X-Save-Mtime")) || Date.now(), announce });
       return;
     } catch (err) {
       // The game may be mid-write; give it a moment and retry.
@@ -215,7 +217,7 @@ function renderWelcome() {
     <p class="flourish">✦ ✦ ✦</p>
     <p class="lede">${state.noServer ? "Open your save file to get started." : "No Nightreign save was found automatically."} Your save lives at ${where}.</p>
     <div class="actions">
-      <label class="btn btn-primary"><input type="file" accept=".sl2,.bak" hidden data-file /> Open save file…</label>
+      <label class="btn btn-primary"><input type="file" accept=".sl2,.co2,.bak" hidden data-file /> Open save file…</label>
     </div>
     <p class="muted">…or drag and drop it anywhere on this page.</p>
     ${safetyNote()}
@@ -262,7 +264,10 @@ function renderStatus() {
   }
   if (state.source === "live") {
     el.className = `save-status ${state.liveConnected ? "live" : ""}`;
-    el.innerHTML = `<span class="dot"></span><span title="Auto-refreshes when the game saves">${state.liveConnected ? "Live" : "Reconnecting…"} · saved ${timeAgo(state.mtimeMs)}</span>`;
+    const picker = state.saves.length > 1
+      ? `<select data-save-select aria-label="Save file">${state.saves.map((s) => `<option value="${esc(s.id)}" ${s.id === state.saveId ? "selected" : ""}>${esc(s.label)}</option>`).join("")}</select>`
+      : "";
+    el.innerHTML = `${picker}<span class="dot"></span><span title="Auto-refreshes when the game saves">${state.liveConnected ? "Live" : "Reconnecting…"} · saved ${timeAgo(state.mtimeMs)}</span>`;
   } else {
     el.className = "save-status file";
     el.innerHTML = `<span class="dot"></span><span>${esc(state.fileName)}</span>${state.saves.length ? ` <button class="btn btn-ghost" data-action="back-live" style="padding:2px 8px">Back to live save</button>` : ""}`;
@@ -751,6 +756,10 @@ function wireGlobalEvents() {
       state.combo.result = null;
       renderAll();
       return;
+    }
+    if (t.matches("[data-save-select]")) {
+      state.combo.result = null;
+      return loadLive(t.value);
     }
     if (t.dataset.toggle) {
       state.browse[t.dataset.toggle] = t.checked;

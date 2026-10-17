@@ -18,6 +18,10 @@ On Windows you can double-click `Relic Vault.cmd` instead. It opens `http://loca
 save from `%APPDATA%\Nightreign\<SteamID>\NR0000.sl2`. The page updates on its own whenever the game saves.
 You can also open or drag in any `.sl2` file.
 
+Modded saves work too: `.co2` alt saves in the same folder (e.g. More Map Variations via ModEngine3) show up in
+a save picker next to the normal one. `python -I scripts/extract-mmv-names.py` refreshes the names of effects
+only MMV has (`public/data/mmv-names.json`); those are marked "(MMV)".
+
 ## Is it safe?
 
 Yes. It never touches the game process or its memory, so Easy Anti-Cheat has nothing to detect. The save
