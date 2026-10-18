@@ -249,7 +249,8 @@ main { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .relic-head { display: flex; align-items: flex-start; gap: 6px; }
 .relic-name { flex: 1; font-family: var(--serif); font-weight: 600; font-size: 15px; line-height: 1.2; }
 .relic.deep .relic-name { color: #b7acff; }
-.relic.unique .relic-name { background-image: linear-gradient(180deg, #fff3cc, var(--gold-hi) 50%, var(--gold)); -webkit-background-clip: text; background-clip: text; color: transparent; }
+/* Solid color, not a background-clip gradient: page recolorers like Dark Reader darken gradients and leave the name unreadable */
+.relic.unique .relic-name { color: var(--gold-hi); text-shadow: 0 0 8px rgba(244, 221, 156, 0.25); }
 .relic ul { margin: 0; padding: 0; list-style: none; }
 .relic li { position: relative; margin: 0 0 3px; padding-left: 13px; font-size: 13px; color: #d8d3c8; }
 .relic li::before { content: "◆"; position: absolute; left: 0; top: 1px; font-size: 8px; color: var(--accent); opacity: 0.85; }
