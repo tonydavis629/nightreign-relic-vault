@@ -1,6 +1,6 @@
 // Relic Vault — main UI.
 import { buildSearch } from "./combo-core.js";
-import { SearchCancelled, cancelSearch, searchCombos } from "./combo-client.js";
+import { SearchCancelled, cancelSearch, lastDiagnostics, searchCombos } from "./combo-client.js";
 import { Color, EffectType, ItemType, RELIC_COLORS, createGameData, isSameGroup, isSameGroupAndEqualOrBetter, relicEffectCount, relicHasEffect } from "./game-data.js";
 import { availableEffects as computeAvailableEffects, buildCharacter } from "./model.js";
 import { DEFAULT_RANK, MAX_RANK, clampRank, rankLabel, rankOf, weightForRank } from "./priority.js";
@@ -582,6 +582,7 @@ async function runComboSearch() {
     state.combo.result = {
       ms: res.ms,
       checked: res.checked,
+      workerError: res.mainThread ? res.workerError : null,
       highlighted: selected,
       entries: s.selectedEffects.map((e) => ({ ...e, effect: state.gd.effectByKey(e.effectKey) })),
       excludeDeep: s.excludeDeepEffects,
@@ -681,6 +682,41 @@ function priorityRow(entry, required) {
   </div>`;
 }
 
+const debugButton = `<button class="btn" data-action="copy-debug">Copy debug report</button>`;
+
+/** Plain-text report for bug reports: browser, search size and worker diagnostics. No save data. */
+function debugReport() {
+  const c = state.combo;
+  return JSON.stringify({
+    app: "Relic Vault",
+    page: location.href,
+    userAgent: navigator.userAgent,
+    cores: navigator.hardwareConcurrency,
+    deviceMemoryGB: navigator.deviceMemory,
+    jsHeapLimitMB: performance.memory ? Math.round(performance.memory.jsHeapSizeLimit / 1048576) : undefined,
+    crossOriginIsolated: self.crossOriginIsolated,
+    moduleWorkers: typeof Worker === "function",
+    nightfarer: c.nightfarer,
+    settings: comboSettings(),
+    error: c.error,
+    search: lastDiagnostics,
+  }, null, 2);
+}
+
+async function copyDebugReport() {
+  const text = debugReport();
+  console.info("[Relic Vault] debug report\n" + text);
+  try {
+    await navigator.clipboard.writeText(text);
+    toast("Debug report copied. Paste it into a GitHub issue.");
+  } catch {
+    // Clipboard blocked: show it so it can be copied by hand
+    const w = window.open("", "_blank");
+    if (w) w.document.body.innerHTML = `<pre>${esc(text)}</pre>`;
+    else toast("Copy failed; the report is in the browser console (F12).");
+  }
+}
+
 function renderComboResults() {
   const el = $("#combo-results");
   if (!el) return;
@@ -693,9 +729,10 @@ function renderComboResults() {
     html += `<p class="muted">Enable at least one vessel.</p>`;
   } else {
     html += `<div class="progress ${running ? "running" : ""}"><div></div></div>`;
-    if (error) html += `<div class="error-box">Search failed: ${esc(error)}</div>`;
+    if (error) html += `<div class="error-box">Search failed: ${esc(error)} ${debugButton}</div>`;
     if (result && !running) {
       html += `<p class="muted">Checked ${result.checked.toLocaleString()} combinations in ${result.ms.toLocaleString()} ms.</p>`;
+      if (result.workerError) html += `<p class="muted">Ran without background workers (${esc(result.workerError)}). ${debugButton}</p>`;
     } else if (running) {
       html += `<p class="rs-loading stone">Loading - please wait.</p>`;
     }
@@ -861,6 +898,7 @@ function wireGlobalEvents() {
     if (t.dataset.combo === "all-vessels") { comboSettings().disabledVessels = []; return comboChanged(); }
     if (t.dataset.combo === "no-vessels") { comboSettings().disabledVessels = nightfarer().vessels.map((_, i) => i); return comboChanged(); }
     if (t.dataset.action === "mark-seen") return markAllSeen();
+    if (t.dataset.action === "copy-debug") return copyDebugReport();
     if (t.dataset.action === "back-live") return loadLive(state.saves[0].id);
   });
 

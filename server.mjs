@@ -155,20 +155,28 @@ function hostAllowed(req) {
 async function serveStatic(req, res, pathname) {
   const rel = normalize(decodeURIComponent(pathname === "/" ? "/index.html" : pathname)).replace(/^([/\\])+/, "");
   const file = resolve(PUBLIC_DIR, rel);
-  if (!file.startsWith(PUBLIC_DIR + sep)) return send(res, 403, "Forbidden");
+  if (!file.startsWith(PUBLIC_DIR + sep)) {
+    console.warn(`403 ${pathname}`);
+    return send(res, 403, "Forbidden");
+  }
   try {
     const s = await stat(file);
     if (!s.isFile()) throw new Error("not a file");
     res.writeHead(200, { ...SECURITY_HEADERS, "Content-Type": MIME[extname(file)] ?? "application/octet-stream", "Content-Length": s.size, "Cache-Control": "no-cache" });
     createReadStream(file).pipe(res);
-  } catch {
+  } catch (err) {
+    // Printed so a "Search failed" / blank page report can include why a script didn't load
+    console.warn(`404 ${pathname} -> ${file} (${err?.code ?? err?.message ?? err})`);
     send(res, 404, "Not found");
   }
 }
 
 const server = createServer(async (req, res) => {
   try {
-    if (!hostAllowed(req)) return send(res, 421, "This server only answers to localhost");
+    if (!hostAllowed(req)) {
+      console.warn(`421 Host "${req.headers.host}" rejected; open http://localhost:${PORT} instead`);
+      return send(res, 421, "This server only answers to localhost");
+    }
     if (req.method !== "GET" && req.method !== "HEAD") return send(res, 405, "Read-only server", { Allow: "GET, HEAD" });
     const url = new URL(req.url, `http://${req.headers.host}`);
 
@@ -201,6 +209,7 @@ const server = createServer(async (req, res) => {
     if (url.pathname.startsWith("/api/")) return json(res, 404, { error: "Not found" });
     return serveStatic(req, res, url.pathname);
   } catch (err) {
+    console.error(`500 ${req.url}:`, err);
     json(res, 500, { error: String(err?.message ?? err) });
   }
 });

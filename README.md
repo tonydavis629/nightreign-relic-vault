@@ -42,6 +42,13 @@ leaves your PC: the server only answers on localhost.
 
 ![Relic browser](docs/relics.jpg)
 
+## Troubleshooting
+
+If the Combo Finder says "Search failed" or "Ran without background workers", click **Copy debug report** and
+paste it into a [GitHub issue](https://github.com/tonydavis629/nightreign-relic-vault/issues), along with any
+`404` or `500` lines from the terminal window running the server. The report has your browser, the search size
+and the worker error; it contains no save data.
+
 ## Development
 
 ```
