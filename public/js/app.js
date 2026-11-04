@@ -3,7 +3,8 @@ import { buildSearch } from "./combo-core.js";
 import { SearchCancelled, cancelSearch, lastDiagnostics, searchCombos } from "./combo-client.js";
 import { Color, EffectType, ItemType, RELIC_COLORS, createGameData, isSameGroup, isSameGroupAndEqualOrBetter, relicEffectCount, relicHasEffect } from "./game-data.js";
 import { availableEffects as computeAvailableEffects, buildCharacter } from "./model.js";
-import { DEFAULT_RANK, MAX_RANK, clampRank, rankLabel, rankOf, weightForRank } from "./priority.js";
+import { emptyBuild, fromStored, newAvoid, newWanted, signature, summary, toStored } from "./builds.js";
+import { MAX_RANK, avoidPenaltyForRank, clampRank, rankLabel, wantedWeight, weightForRank } from "./priority.js";
 import { SaveParseError, parseSave } from "./save-parser.js";
 import { $, banner, colorChip, effectPicker, esc, relicCard, timeAgo, toast } from "./ui.js";
 
@@ -53,7 +54,8 @@ const state = {
   browse: { search: "", filter: store.get("browse.filter", 0), sell: false, newOnly: false },
   combo: {
     nightfarer: store.get("combo.nightfarer", 0),
-    settings: store.get("combo.settings", {}),
+    build: null, // working copy of the selected build; every edit is saved right away
+    ui: {}, // { creating | renaming | duplicating | confirmDelete }
     result: null,
     running: false,
     error: null,
@@ -80,6 +82,7 @@ async function boot() {
   } catch (err) {
     return showFatal(`Could not load game data (data/game-data.json): ${err.message}`);
   }
+  migrateOldSettings();
   wireGlobalEvents();
   try {
     const res = await fetch("api/saves", { cache: "no-store" });
@@ -366,67 +369,55 @@ function openCompare(uid) {
 }
 
 // ---------------------------------------------------------------------------
-// Combo Finder tab
+// Combo Finder tab: Nightfarer -> build -> wanted and avoided effects. Every vessel of the
+// Nightfarer is searched.
 // ---------------------------------------------------------------------------
-function comboSettings(nf = state.combo.nightfarer) {
-  const s = state.combo.settings[nf] ?? (state.combo.settings[nf] = { disabledVessels: [], selectedEffects: [], excludeDeepEffects: false });
-  s.disabledVessels ??= [];
-  s.selectedEffects ??= [];
-  s.cursePenalty ??= "light";
-  // Drop entries whose effect no longer exists in the data
-  s.selectedEffects = s.selectedEffects.filter((e) => state.gd.effectByKey(e.effectKey) && !state.gd.effectByKey(e.effectKey).unknown);
-  for (const e of s.selectedEffects) {
-    e.rank = rankOf(e);
-    e.weight = weightForRank(e.rank);
-  }
-  return s;
-}
-function saveComboSettings() {
-  store.set("combo.settings", state.combo.settings);
-  store.set("combo.nightfarer", state.combo.nightfarer);
-}
-
 const nightfarer = () => state.gd.nightfarers.find((n) => n.id === state.combo.nightfarer) ?? state.gd.nightfarers[0];
-const enabledVessels = () => {
-  const s = comboSettings();
-  return nightfarer().vessels.filter((_, i) => !s.disabledVessels.includes(i));
-};
 const orBetter = (e) => e.stacks && !e.maxLevel;
 const effectLabel = (e) => `${e.name}${orBetter(e) ? " (or better)" : ""}`;
+const RANKS = Array.from({ length: MAX_RANK }, (_, i) => i + 1);
+const rankName = (r) => (r === 1 ? "1 · highest" : rankLabel(r));
 
 /**
  * Every effect this Nightfarer can use: their own effects first, then A-Z with MMV-only ones last. Effects in none of
  * the character's relics are listed too (dimmed by the picker). MMV-only effects are offered
- * on modded saves, or when a relic has one.
+ * on modded saves, or when a relic has one. Effects already in the build are left out.
  */
 function selectableEffects() {
   const nf = state.combo.nightfarer;
-  const exclude = comboSettings().excludeDeepEffects;
   const have = new Set(availableEffects(character()));
   const modded = /\.co2$/i.test(state.fileName ?? "");
+  const b = state.combo.build;
+  const used = new Set(b ? [...b.wanted, ...b.avoid].map((e) => e.effectKey) : []);
   return state.gd.effectsByKey
     .filter((e) =>
-      e && !e.unknown &&
+      e && !e.unknown && !used.has(e.key) &&
       (!e.mmv || modded || have.has(e)) &&
-      (e.nightfarer === undefined || e.nightfarer === nf || ALWAYS_SELECTABLE.has(e.slug)) &&
-      (!exclude || e.type !== EffectType.Debuff))
+      (e.nightfarer === undefined || e.nightfarer === nf || ALWAYS_SELECTABLE.has(e.slug)))
     .sort((a, b) => (b.nightfarer === nf) - (a.nightfarer === nf) || Boolean(a.mmv) - Boolean(b.mmv) || a.name.localeCompare(b.name, undefined, { numeric: true }));
 }
-const notInRelicsHint = (e) => (availableEffects(character()).includes(e) ? "" : "not in your relics");
+const wantOptions = () => selectableEffects().filter((e) => e.type !== EffectType.Debuff);
+// Curses first, then anything else a build might want to keep out
+const avoidOptions = () => {
+  const all = selectableEffects();
+  return [...all.filter((e) => e.type === EffectType.Debuff), ...all.filter((e) => e.type !== EffectType.Debuff)];
+};
+const inRelics = (e) => availableEffects(character()).includes(e);
+const notInRelicsHint = (e) => (inRelics(e) ? "" : "not in your relics");
 
-/** Most copies of `effect` that one enabled vessel could hold with this character's relics. */
+/** Most copies of `effect` that one vessel could hold with this character's relics. */
 function maxStacksFor(effect) {
   if (effect.stacks !== true) return 1;
   const c = character();
-  const exclude = comboSettings().excludeDeepEffects;
+  const deepOff = !state.combo.build?.includeDeep;
   const normal = c.relics.filter((r) => !r.isDeep && relicHasEffect(r, effect));
   const deep = c.relics.filter((r) => r.isDeep && relicHasEffect(r, effect));
   let best = 0;
-  for (const vessel of enabledVessels()) {
+  for (const vessel of nightfarer().vessels) {
     const used = [];
     let total = 0;
     vessel.slots.forEach((slot, i) => {
-      if (i >= 3 && exclude) return;
+      if (i >= 3 && deepOff) return;
       const pool = (i >= 3 ? deep : normal).filter((r) => slot === Color.Any || r.color === slot);
       let max = 0, pick;
       for (const r of pool) {
@@ -443,110 +434,166 @@ function maxStacksFor(effect) {
 }
 
 // ---------------------------------------------------------------------------
-// Builds: named Combo Finder setups, from data/presets.json plus the ones saved in this
-// browser, shown as one list. Effects are stored by name (slug) so they survive data updates.
-// The server never writes files, so deleting a presets.json build just hides it here.
+// Builds. data/presets.json builds are listed alongside the ones made here. The server never
+// writes files, so editing a file build saves a copy in this browser under the same id, and
+// deleting one hides it.
 // ---------------------------------------------------------------------------
 const userBuilds = () => store.get("builds", []);
 const hiddenPresets = () => store.get("builds.hidden", []);
-const allBuilds = () => [...(state.presets ?? []).filter((b) => !hiddenPresets().includes(b.id)).map((b) => ({ ...b, fromFile: true })), ...userBuilds()];
 
-function buildsBar() {
-  if (state.combo.savingBuild) {
-    return `<div class="builds"><input class="text-input plain" data-build-name placeholder="Name this build" maxlength="60" autofocus />
-      <button class="btn btn-primary" data-build="confirm-save">Save</button><button class="btn btn-ghost" data-build="cancel-save">Cancel</button></div>`;
-  }
-  const builds = allBuilds();
-  const loaded = builds.find((b) => b.id === state.combo.loadedBuild);
-  const opt = (b) => `<option value="${esc(b.id)}" ${b.id === state.combo.loadedBuild ? "selected" : ""}>${esc(b.name)}</option>`;
-  return `<div class="builds">
-    <select data-build-select aria-label="Load a build">
-      <option value="">${builds.length ? "Load a build…" : "No saved builds yet"}</option>
-      ${builds.map(opt).join("")}
-    </select>
-    <button class="btn" data-build="save" title="Save the current Nightfarer, effects, priorities and curse setting">Save…</button>
-    ${loaded ? `<button class="btn btn-ghost" data-build="delete" title="Delete this saved build">Delete</button>` : ""}
-  </div>`;
+function storedBuilds() {
+  const mine = userBuilds();
+  const byId = new Map(mine.map((b) => [b.id, b]));
+  const hidden = new Set(hiddenPresets());
+  const presets = (state.presets ?? []).filter((b) => !hidden.has(b.id));
+  const presetIds = new Set((state.presets ?? []).map((b) => b.id));
+  return [...presets.map((b) => byId.get(b.id) ?? b), ...mine.filter((b) => !presetIds.has(b.id))];
 }
+const buildsFor = (nf) => storedBuilds().filter((b) => b.nightfarer === nf);
+const newBuildId = () => `user-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 5)}`;
 
-function loadBuild(id) {
-  const build = allBuilds().find((b) => b.id === id);
-  if (!build) return;
-  const bySlug = new Map(state.gd.effectsByKey.filter(Boolean).map((e) => [e.slug, e]));
-  const entries = [];
-  const missing = [];
-  for (const e of build.effects) {
-    const effect = bySlug.get(e.slug);
-    if (!effect) { missing.push(e.slug); continue; }
-    const rank = rankOf(e);
-    entries.push({ effectKey: effect.key, minStacks: e.min ?? 0, maxStacks: e.max ?? (effect.stacks ? 10 : 1), rank, weight: weightForRank(rank) });
-  }
+function selectBuild(id, { quiet = false } = {}) {
+  const stored = storedBuilds().find((b) => b.id === id);
+  if (!stored) return;
+  const { build, missing } = fromStored(state.gd, stored);
+  state.combo.build = build;
   state.combo.nightfarer = build.nightfarer;
-  const s = comboSettings();
-  s.selectedEffects = entries;
-  s.excludeDeepEffects = Boolean(build.excludeDeepEffects);
-  s.cursePenalty = CURSE_PENALTY[build.cursePenalty] ? build.cursePenalty : "light";
-  state.combo.loadedBuild = id;
+  state.combo.ui = {};
   state.combo.result = null;
-  const have = new Set(availableEffects(character()));
-  const absent = entries.filter((e) => e.maxStacks > 0 && !have.has(state.gd.effectByKey(e.effectKey))).length;
-  toast(`Loaded "${build.name}"${absent ? ` — ${absent} effect(s) aren't on ${character().name}'s relics` : ""}${missing.length ? ` — ${missing.length} unknown effect(s) skipped` : ""}`);
+  store.set("combo.active", { ...store.get("combo.active", {}), [build.nightfarer]: id });
+  saveNightfarer();
+  if (quiet) return;
+  const absent = build.wanted.filter((e) => !inRelics(state.gd.effectByKey(e.effectKey))).length;
+  const notes = [
+    absent && `${absent} wanted effect${absent === 1 ? " isn't" : "s aren't"} on ${character().name}'s relics`,
+    missing && `${missing} unknown effect(s) skipped`,
+  ].filter(Boolean);
+  if (notes.length) toast(`${build.name}: ${notes.join(", ")}`);
+}
+
+/** Makes sure the working build belongs to the selected Nightfarer (last used, else their first). */
+function ensureBuild() {
+  const nf = state.combo.nightfarer;
+  const b = state.combo.build;
+  const list = buildsFor(nf);
+  if (b && b.nightfarer === nf && list.some((s) => s.id === b.id)) return;
+  const remembered = store.get("combo.active", {})[nf];
+  const pick = list.find((s) => s.id === remembered) ?? list[0];
+  state.combo.build = null;
+  if (pick) selectBuild(pick.id, { quiet: true });
+}
+
+function persistBuild() {
+  const b = state.combo.build;
+  if (!b) return;
+  const stored = toStored(state.gd, b);
+  const mine = userBuilds();
+  const i = mine.findIndex((x) => x.id === b.id);
+  if (i >= 0) mine[i] = stored; else mine.push(stored);
+  store.set("builds", mine);
+}
+
+function saveNightfarer() {
+  store.set("combo.nightfarer", state.combo.nightfarer);
+}
+
+/** One-time move of the old per-Nightfarer working setup into a "Recovered build" when it isn't already a build. */
+function migrateOldSettings() {
+  if (store.get("builds.migrated", false)) return;
+  const old = store.get("combo.settings", {});
+  const known = new Set(storedBuilds().map((s) => signature(fromStored(state.gd, s).build)));
+  const mine = userBuilds();
+  for (const [nf, s] of Object.entries(old ?? {})) {
+    if (!state.gd.nightfarers.some((n) => n.id === Number(nf)) || !s?.selectedEffects?.length) continue;
+    const effects = s.selectedEffects
+      .map((e) => ({ slug: state.gd.effectByKey(e.effectKey)?.slug, min: e.minStacks, max: e.maxStacks, ...(e.rank !== undefined ? { rank: e.rank } : { weight: e.weight }) }))
+      .filter((e) => e.slug);
+    const { build } = fromStored(state.gd, { id: newBuildId(), name: "Recovered build", nightfarer: Number(nf), excludeDeepEffects: s.excludeDeepEffects, cursePenalty: s.cursePenalty, effects });
+    if (build.wanted.length + build.avoid.length === 0 || known.has(signature(build))) continue;
+    mine.push(toStored(state.gd, build));
+  }
+  store.set("builds", mine);
+  store.set("builds.migrated", true);
+}
+
+function createBuild(name, from = null) {
+  const id = newBuildId();
+  const build = from ? { ...structuredClone(from), id, name } : emptyBuild(id, name, state.combo.nightfarer);
+  state.combo.build = build;
+  state.combo.ui = {};
+  state.combo.result = null;
+  store.set("combo.active", { ...store.get("combo.active", {}), [build.nightfarer]: id });
   comboChanged();
-}
-
-function saveBuild() {
-  state.combo.savingBuild = true;
-  renderCombo();
-  $("[data-build-name]")?.focus();
-}
-
-function confirmSaveBuild() {
-  const name = $("[data-build-name]")?.value.trim();
-  if (!name) return $("[data-build-name]")?.focus();
-  const s = comboSettings();
-  const build = {
-    id: `user-${Date.now().toString(36)}`,
-    name,
-    nightfarer: state.combo.nightfarer,
-    excludeDeepEffects: s.excludeDeepEffects,
-    cursePenalty: s.cursePenalty,
-    effects: s.selectedEffects.map((e) => ({ slug: state.gd.effectByKey(e.effectKey).slug, min: e.minStacks, max: e.maxStacks, priority: e.rank })),
-  };
-  store.set("builds", [...userBuilds(), build]);
-  state.combo.savingBuild = false;
-  state.combo.loadedBuild = build.id;
-  toast(`Saved build "${name}"`);
-  renderCombo();
+  if (!from) $("#want-picker input")?.focus();
 }
 
 function deleteBuild() {
-  const id = state.combo.loadedBuild;
-  store.set("builds", userBuilds().filter((b) => b.id !== id));
-  if ((state.presets ?? []).some((b) => b.id === id)) store.set("builds.hidden", [...hiddenPresets(), id]);
-  state.combo.loadedBuild = null;
+  const b = state.combo.build;
+  if (!b) return;
+  store.set("builds", userBuilds().filter((x) => x.id !== b.id));
+  if ((state.presets ?? []).some((x) => x.id === b.id)) store.set("builds.hidden", [...hiddenPresets(), b.id]);
+  toast(`Deleted "${b.name}"`);
+  state.combo.build = null;
+  state.combo.ui = {};
+  state.combo.result = null;
   renderCombo();
+  scheduleSearch();
 }
 
-function addEffect(effect) {
-  const s = comboSettings();
-  if (s.selectedEffects.some((e) => e.effectKey === effect.key)) return;
+function confirmName() {
+  const input = $("[data-build-name]");
+  const name = input?.value.trim();
+  if (!name) return input?.focus();
+  const ui = state.combo.ui;
+  if (ui.renaming) {
+    state.combo.build.name = name;
+    state.combo.ui = {};
+    comboChanged({ search: false });
+  } else {
+    createBuild(name, ui.duplicating ? state.combo.build : null);
+  }
+}
+
+function startNaming(mode) {
+  state.combo.ui = { [mode]: true };
+  renderCombo();
+  const input = $("[data-build-name]");
+  input?.focus();
+  input?.select();
+}
+
+// ---------------------------------------------------------------------------
+// Editing effects (every change is saved to the build right away)
+// ---------------------------------------------------------------------------
+function addWanted(effect) {
+  const b = state.combo.build;
+  if (!b || b.wanted.some((e) => e.effectKey === effect.key)) return;
   // Same rules as upstream: a stackable effect replaces other levels of its group,
   // and only one "starting armament" bonus of each kind can apply.
-  s.selectedEffects = s.selectedEffects.filter((entry) => {
+  b.wanted = b.wanted.filter((entry) => {
     const e = state.gd.effectByKey(entry.effectKey);
     if (isSameGroup(e, effect) && e.stacks === true && effect.stacks === true) return false;
     if (e.startingBonus !== undefined && e.startingBonus === effect.startingBonus) return false;
     return true;
   });
-  s.selectedEffects.push({ effectKey: effect.key, minStacks: 0, maxStacks: effect.stacks ? 10 : 1, rank: DEFAULT_RANK, weight: weightForRank(DEFAULT_RANK) });
+  b.wanted.push(newWanted(effect));
   comboChanged();
-  $("#combo-picker input")?.focus(); // keep typing to add more
+  $("#want-picker input")?.focus(); // keep typing to add more
 }
 
-function comboChanged({ rerender = true } = {}) {
-  saveComboSettings();
+function addAvoid(effect) {
+  const b = state.combo.build;
+  if (!b || b.avoid.some((e) => e.effectKey === effect.key)) return;
+  b.avoid.push(newAvoid(effect));
+  comboChanged();
+  $("#avoid-picker input")?.focus();
+}
+
+function comboChanged({ rerender = true, search = true } = {}) {
+  persistBuild();
+  saveNightfarer();
   if (rerender) renderCombo();
-  scheduleSearch();
+  if (search) scheduleSearch();
 }
 
 let searchTimer;
@@ -556,23 +603,27 @@ function scheduleSearch() {
 }
 
 async function runComboSearch() {
-  const s = comboSettings();
-  const selected = s.selectedEffects.map((e) => state.gd.effectByKey(e.effectKey));
-  const vessels = enabledVessels();
-  if (selected.length === 0 || vessels.length === 0) {
+  const b = state.combo.build;
+  if (!b || b.wanted.length === 0) {
     cancelSearch();
     Object.assign(state.combo, { result: null, running: false, error: null });
     return renderComboResults();
   }
+  const selected = b.wanted.map((e) => state.gd.effectByKey(e.effectKey));
+  const vessels = nightfarer().vessels;
   const c = character();
   const built = buildSearch(state.gd, {
-    nightfarer: state.combo.nightfarer,
+    nightfarer: b.nightfarer,
     selectedEffects: selected,
     relics: c.relics.filter((r) => r.item.type === ItemType.Relic || r.item.type === ItemType.UniqueRelic),
-    deepRelics: s.excludeDeepEffects ? [] : c.relics.filter((r) => r.item.type === ItemType.DeepRelic),
+    deepRelics: b.includeDeep ? c.relics.filter((r) => r.item.type === ItemType.DeepRelic) : [],
     enabledVessels: vessels,
-    selectedEntries: s.selectedEffects,
-    cursePenalty: CURSE_PENALTY[s.cursePenalty]?.value ?? 0,
+    selectedEntries: [
+      ...b.wanted.map((e) => ({ effectKey: e.effectKey, minStacks: e.minStacks, maxStacks: e.maxStacks, weight: wantedWeight(e) })),
+      ...b.avoid.filter((a) => a.block).map((a) => ({ effectKey: a.effectKey, minStacks: 0, maxStacks: 0 })),
+    ],
+    avoidEntries: b.avoid.filter((a) => !a.block).map((a) => ({ effectKey: a.effectKey, penalty: avoidPenaltyForRank(a.rank) })),
+    cursePenalty: CURSE_PENALTY[b.cursePenalty]?.value ?? 0,
   });
   state.combo.running = true;
   state.combo.error = null;
@@ -584,8 +635,9 @@ async function runComboSearch() {
       checked: res.checked,
       workerError: res.mainThread ? res.workerError : null,
       highlighted: selected,
-      entries: s.selectedEffects.map((e) => ({ ...e, effect: state.gd.effectByKey(e.effectKey) })),
-      excludeDeep: s.excludeDeepEffects,
+      entries: b.wanted.map((e) => ({ ...e, effect: state.gd.effectByKey(e.effectKey) })),
+      avoided: b.avoid.map((a) => ({ ...a, effect: state.gd.effectByKey(a.effectKey) })),
+      excludeDeep: !b.includeDeep,
       combos: res.combinations.map((combo) => ({
         vessel: vessels[combo.vessel],
         points: combo.points,
@@ -601,85 +653,160 @@ async function runComboSearch() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Combo Finder rendering
+// ---------------------------------------------------------------------------
 function renderCombo() {
-  const s = comboSettings();
+  ensureBuild();
   const nf = nightfarer();
-  const exclude = s.excludeDeepEffects;
+  const b = state.combo.build;
   $("#app").innerHTML = `<div class="combo">
     <section>
       <h3>I · Nightfarer</h3>
-      <div class="nf-list">${state.gd.nightfarers.map((n) => `<label><input type="radio" name="nf" value="${n.id}" ${n.id === nf.id ? "checked" : ""}/> ${esc(n.name)}</label>`).join("")}</div>
+      <div class="nf-list">${state.gd.nightfarers.map((n) => {
+        const count = buildsFor(n.id).length;
+        return `<label><input type="radio" name="nf" value="${n.id}" ${n.id === nf.id ? "checked" : ""}/> ${esc(n.name)}${count ? `<span class="nf-count" title="${count} build${count === 1 ? "" : "s"}">${count}</span>` : ""}</label>`;
+      }).join("")}</div>
     </section>
-    <section>
-      <h3>II · Vessels</h3>
-      <label class="switch"><input type="checkbox" data-combo="include-deep" ${exclude ? "" : "checked"}/> Include deep relic slots</label>
-      <div class="vessel-tools"><button class="btn" data-combo="all-vessels">All</button><button class="btn" data-combo="no-vessels">None</button></div>
-      ${nf.vessels.map((v, i) => {
-        const off = s.disabledVessels.includes(i);
-        return `<label class="vessel ${off ? "off" : ""}">
-          <div class="vessel-top"><span>${esc(v.name)}</span><input type="checkbox" data-vessel="${i}" ${off ? "" : "checked"}/></div>
-          <div class="vessel-slots">${v.slots.map((color, si) => (si < 3 || !exclude ? colorChip(color, si >= 3, off ? "off" : "") : "")).join("")}</div>
-        </label>`;
-      }).join("")}
+    <section class="build-col">
+      <h3>II · Build</h3>
+      ${buildColumn(nf, b)}
     </section>
-    <section>
+    <section class="editor">
       <h3>III · Effects</h3>
-      ${buildsBar()}
-      <div id="combo-picker"></div>
-      <div class="opt-row" title="Deep relics carry curses. Upstream ignores them; a penalty steers the optimizer toward cleaner relics.">
-        <span>Curses</span>
-        <div class="segmented small">${Object.entries(CURSE_PENALTY).map(([k, v]) => `<button type="button" data-curse="${k}" aria-pressed="${s.cursePenalty === k}">${v.label}</button>`).join("")}</div>
-      </div>
-      <ul class="picked">${[...s.selectedEffects].sort((a, b) => a.rank - b.rank).map((entry) => pickedEffectRow(entry)).join("")}</ul>
-      ${s.selectedEffects.length === 0 ? `<p class="muted" style="margin-top:14px">Pick the effects you want. Only effects that exist on ${esc(character().name)}'s relics are listed. Stackable effects match "this level or better".</p>` : ""}
+      ${b ? effectsEditor(b) : `<div class="empty small"><strong>No build selected</strong><span>Create a ${esc(nf.name)} build to choose effects.</span></div>`}
     </section>
     <section class="results" id="combo-results"></section>
   </div>`;
 
-  effectPicker($("#combo-picker"), {
-    placeholder: "Search effects…",
-    getOptions: selectableEffects,
-    label: effectLabel,
-    hint: notInRelicsHint,
-    clearOnPick: true,
-    onPick: addEffect,
-  });
+  if (b) {
+    effectPicker($("#want-picker"), { placeholder: "Add an effect you want…", getOptions: wantOptions, label: effectLabel, hint: notInRelicsHint, clearOnPick: true, onPick: addWanted });
+    effectPicker($("#avoid-picker"), { placeholder: "Add a curse to avoid…", getOptions: avoidOptions, hint: notInRelicsHint, clearOnPick: true, onPick: addAvoid });
+  }
   renderComboResults();
 }
 
-function pickedEffectRow(entry) {
+const nameForm = (value, label) => `<div class="name-row">
+  <input class="text-input plain" data-build-name value="${esc(value)}" placeholder="Build name" maxlength="80" />
+  <button class="btn btn-primary" data-build="confirm-name">${label}</button>
+  <button class="btn btn-ghost" data-build="cancel">Cancel</button>
+</div>`;
+
+function buildColumn(nf, b) {
+  const ui = state.combo.ui ?? {};
+  const list = buildsFor(nf.id);
+  const top = ui.creating
+    ? nameForm("", "Create")
+    : `<button type="button" class="btn new-build" data-build="new">+ New ${esc(nf.name)} build</button>`;
+  const items = list.map((s) => {
+    const active = b?.id === s.id;
+    if (active && ui.renaming) return `<div class="build-item active">${nameForm(b.name, "Rename")}</div>`;
+    const meta = summary(active ? b : fromStored(state.gd, s).build);
+    return `<button type="button" class="build-item${active ? " active" : ""}" data-build-pick="${esc(s.id)}" aria-pressed="${active}">
+      <span class="bname">${esc(active ? b.name : s.name)}</span><span class="bmeta">${meta}</span>
+    </button>`;
+  }).join("");
+  const dup = ui.duplicating ? nameForm(`${b.name} (copy)`, "Duplicate") : "";
+  const actions = b && !ui.renaming && !ui.duplicating ? `<div class="build-actions">
+      <button class="btn btn-ghost" data-build="rename">Rename</button>
+      <button class="btn btn-ghost" data-build="duplicate">Duplicate</button>
+      ${ui.confirmDelete
+        ? `<button class="btn btn-danger" data-build="confirm-delete">Delete it</button><button class="btn btn-ghost" data-build="cancel">Keep</button>`
+        : `<button class="btn btn-ghost" data-build="delete">Delete</button>`}
+    </div>` : "";
+  const options = b ? `<div class="build-options">
+      <label class="switch"><input type="checkbox" data-combo="include-deep" ${b.includeDeep ? "checked" : ""}/> Use deep relic slots</label>
+      <p class="muted fine">Searches all ${nf.vessels.length} of ${esc(nf.name)}'s vessels.</p>
+    </div>` : "";
+  return `${top}
+    <div class="build-list">${items || `<p class="muted fine">No ${esc(nf.name)} builds yet.</p>`}</div>
+    ${dup}${actions}${options}`;
+}
+
+function effectsEditor(b) {
+  const nameOf = (k) => state.gd.effectByKey(k).name;
+  const wanted = [...b.wanted].sort((x, y) =>
+    (y.minStacks > 0) - (x.minStacks > 0) || (x.minStacks > 0 ? 0 : x.rank - y.rank) || nameOf(x.effectKey).localeCompare(nameOf(y.effectKey)));
+  const avoid = [...b.avoid].sort((x, y) =>
+    y.block - x.block || (x.block ? 0 : x.rank - y.rank) || nameOf(x.effectKey).localeCompare(nameOf(y.effectKey)));
+  const required = b.wanted.filter((e) => e.minStacks > 0).length;
+  const blocked = b.avoid.filter((a) => a.block).length;
+  return `
+    <div class="ed-block">
+      <h4 class="ed-title">Wanted <small>${b.wanted.length ? `${required} required · ${b.wanted.length - required} ranked` : "none yet"}</small></h4>
+      <div id="want-picker"></div>
+      ${b.wanted.length
+        ? `<ul class="picked">${wanted.map(wantedRow).join("")}</ul>`
+        : `<p class="muted fine ed-help">Add the effects this build is after. Must-haves are <b>Required</b>; the rest are ranked from 1 (most important) to 12.</p>`}
+    </div>
+    <div class="ed-block avoid-block">
+      <h4 class="ed-title">Avoid <small>${b.avoid.length ? `${blocked} blocked · ${b.avoid.length - blocked} ranked` : "none yet"}</small></h4>
+      <div id="avoid-picker"></div>
+      ${b.avoid.length
+        ? `<ul class="avoid-list">${avoid.map(avoidRow).join("")}</ul>`
+        : `<p class="muted fine ed-help"><b>Block</b> a curse to rule out every relic that carries it, or give it a priority so it only counts against a combo.</p>`}
+      <div class="opt-row" title="How much curses that are not on this list count against a combo">
+        <span>Other curses</span>
+        <div class="segmented small">${Object.entries(CURSE_PENALTY).map(([k, v]) => `<button type="button" data-curse="${k}" aria-pressed="${b.cursePenalty === k}">${v.label}</button>`).join("")}</div>
+      </div>
+      ${b.includeDeep ? "" : `<p class="muted fine">Deep relic slots are off, so no curses can show up.</p>`}
+    </div>`;
+}
+
+function priorityControl(entry) {
+  const required = entry.minStacks > 0;
+  const options = [`<option value="req" ${required ? "selected" : ""}>Required</option>`,
+    ...RANKS.map((r) => `<option value="${r}" ${!required && r === entry.rank ? "selected" : ""}>${rankName(r)}</option>`)].join("");
+  const lit = required ? MAX_RANK : MAX_RANK + 1 - entry.rank;
+  const pips = Array.from({ length: MAX_RANK }, (_, i) => `<i class="${i < lit ? "on" : ""}"></i>`).join("");
+  const title = required ? "Every combo must include this" : `Scores ×${weightForRank(entry.rank)} (1 is ×3 … 12 is ×0.25)`;
+  return `<div class="opt-row prio">
+    <span>Priority</span>
+    <select class="rank-select${required ? " is-required" : ""}" data-want-rank aria-label="Priority: Required, or 1 (highest) to 12">${options}</select>
+    <span class="pips${required ? " req" : ""}" title="${title}">${pips}</span>
+  </div>`;
+}
+
+function wantedRow(entry) {
   const e = state.gd.effectByKey(entry.effectKey);
+  const missing = inRelics(e) ? "" : `<span class="note" title="None of ${esc(character().name)}'s relics have this">not owned</span>`;
+  return `<li data-entry="${e.key}" class="${entry.minStacks > 0 ? "required" : ""}">
+    <div class="row"><span class="name">${esc(effectLabel(e))}</span>${missing}<button class="icon-btn" data-remove="${e.key}" aria-label="Remove ${esc(e.name)}">✕</button></div>
+    ${priorityControl(entry)}
+    ${e.stacks ? stackRange(entry, e) : ""}
+  </li>`;
+}
+
+function stackRange(entry, e) {
   const max = maxStacksFor(e);
   const lo = Math.min(entry.minStacks, max);
   const hi = Math.min(entry.maxStacks, max);
   const pct = (v) => (max === 0 ? 0 : (v / max) * 100);
-  const desc = hi === 0 ? "<b>Excluded</b>: combos must not contain this effect"
-    : `Stacks: <b>${lo === hi ? lo : `${lo} – ${hi}`}</b> <span class="muted">(you can reach ${max})</span>`;
-  return `<li data-entry="${e.key}">
-    <div class="row"><span class="name ${e.type === EffectType.Debuff ? "curse" : ""}">${esc(effectLabel(e))}</span><button class="icon-btn" data-remove="${e.key}" aria-label="Remove ${esc(e.name)}">✕</button></div>
-    ${hi === 0 && entry.maxStacks === 0 ? "" : priorityRow(entry, lo > 0)}
-    <div class="dual-range" style="--max:${max}">
+  const reach = `<span class="muted">(you can reach ${max})</span>`;
+  const desc = max === 0 ? "None of your relics have this."
+    : entry.minStacks > 0 ? `Stacks: at least <b>${lo}</b>${hi > lo ? `, up to <b>${hi}</b>` : ""} ${reach}`
+    : `Stacks: up to <b>${hi}</b> ${reach}`;
+  return `<div class="dual-range" style="--max:${max}">
       <div class="track"></div>
       <div class="fill" style="left:calc(8px + (100% - 16px) * ${pct(lo) / 100});width:calc((100% - 16px) * ${(pct(hi) - pct(lo)) / 100})"></div>
-      <input type="range" min="0" max="${max}" step="1" value="${lo}" data-range="min" aria-label="Minimum stacks" style="z-index:${lo >= max ? 3 : 1}" ${max === 0 ? "disabled" : ""}/>
+      <input type="range" min="0" max="${max}" step="1" value="${lo}" data-range="min" aria-label="Minimum stacks (above 0 makes it required)" style="z-index:${lo >= max ? 3 : 1}" ${max === 0 ? "disabled" : ""}/>
       <input type="range" min="0" max="${max}" step="1" value="${hi}" data-range="max" aria-label="Maximum stacks" style="z-index:2" ${max === 0 ? "disabled" : ""}/>
       <div class="ticks">${Array.from({ length: max + 1 }, (_, i) => `<span>${i}</span>`).join("")}</div>
     </div>
-    <div class="range-label">${desc}</div>
-  </li>`;
+    <div class="range-label">${desc}</div>`;
 }
 
-function priorityRow(entry, required) {
-  const rank = entry.rank;
-  const options = Array.from({ length: MAX_RANK }, (_, i) => i + 1)
-    .map((r) => `<option value="${r}" ${r === rank ? "selected" : ""}>${rankLabel(r)}</option>`).join("");
-  const pips = Array.from({ length: MAX_RANK }, (_, i) => `<i class="${i < MAX_RANK + 1 - rank ? "on" : ""}"></i>`).join("");
-  return `<div class="opt-row">
-    <span>Priority</span>
-    <select class="rank-select" data-rank aria-label="Priority rank, 1 is most important">${options}</select>
-    <span class="pips" title="Scores ×${weightForRank(rank)} (rank 1 ×3 … rank 12 ×0.25)">${pips}</span>
-    ${required ? '<span class="must">Required</span>' : ""}
-  </div>`;
+function avoidRow(a) {
+  const e = state.gd.effectByKey(a.effectKey);
+  const options = [`<option value="block" ${a.block ? "selected" : ""}>Block</option>`,
+    ...RANKS.map((r) => `<option value="${r}" ${!a.block && r === a.rank ? "selected" : ""}>Avoid · ${rankName(r)}</option>`)].join("");
+  const title = a.block ? "Blocked: relics with this are never used" : `Avoided: each copy costs ${avoidPenaltyForRank(a.rank)} points`;
+  return `<li data-avoid="${e.key}" class="${a.block ? "blocked" : "soft"}" title="${esc(title)}">
+    <span class="mark" aria-hidden="true">${a.block ? "⊘" : "▽"}</span>
+    <span class="name${e.type === EffectType.Debuff ? " curse" : ""}">${esc(e.name)}</span>
+    <select class="rank-select" data-avoid-rank aria-label="How strongly to avoid ${esc(e.name)}">${options}</select>
+    <button class="icon-btn" data-remove-avoid="${e.key}" aria-label="Stop avoiding ${esc(e.name)}">✕</button>
+  </li>`;
 }
 
 const debugButton = `<button class="btn" data-action="copy-debug">Copy debug report</button>`;
@@ -697,7 +824,7 @@ function debugReport() {
     crossOriginIsolated: self.crossOriginIsolated,
     moduleWorkers: typeof Worker === "function",
     nightfarer: c.nightfarer,
-    settings: comboSettings(),
+    build: c.build ? toStored(state.gd, c.build) : null,
     error: c.error,
     search: lastDiagnostics,
   }, null, 2);
@@ -720,13 +847,13 @@ async function copyDebugReport() {
 function renderComboResults() {
   const el = $("#combo-results");
   if (!el) return;
-  const s = comboSettings();
+  const b = state.combo.build;
   const { result, running, error } = state.combo;
   let html = "<h3>IV · Results</h3>";
-  if (s.selectedEffects.length === 0) {
-    html += `<p class="muted">Results appear here as soon as you pick an effect.</p>`;
-  } else if (enabledVessels().length === 0) {
-    html += `<p class="muted">Enable at least one vessel.</p>`;
+  if (!b) {
+    html += `<p class="muted">Pick or create a build.</p>`;
+  } else if (b.wanted.length === 0) {
+    html += `<p class="muted">Results appear here as soon as the build wants an effect.</p>`;
   } else {
     html += `<div class="progress ${running ? "running" : ""}"><div></div></div>`;
     if (error) html += `<div class="error-box">Search failed: ${esc(error)} ${debugButton}</div>`;
@@ -738,7 +865,7 @@ function renderComboResults() {
     }
     if (result) {
       html += result.combos.length === 0
-        ? `<div class="empty"><strong>No combination found</strong><span>None of your relics can satisfy every requirement at once. Loosen a stack range or enable more vessels.</span></div>`
+        ? `<div class="empty"><strong>No combination found</strong><span>None of your relics can satisfy every requirement at once. Make an effect optional, loosen a stack range, or unblock a curse.</span></div>`
         : `<p>Showing the best ${result.combos.length} combos</p>` + result.combos.map((combo, i) => comboCard(combo, i, result)).join("");
     }
   }
@@ -753,36 +880,36 @@ function comboCard(combo, i, result) {
       return relicCard(r, { byColor: combo.vessel.slots[slot] !== Color.Any, highlighted: result.highlighted, isNew: state.newKeys.has(r.key), showSell: false });
     })
     .join("");
-  const { goals, curses } = comboGoals(combo, result);
-  const curseChip = curses.length
-    ? `<span class="goal curse" title="${esc(curses.map((c) => c.name).join("\n"))}">⚠ ${curses.length} curse${curses.length === 1 ? "" : "s"}</span>`
-    : (result.excludeDeep ? "" : '<span class="goal ok">No curses</span>');
   return `<article class="combo-card">
-    <header><span class="rank">#${i + 1}</span><span class="vname">${esc(combo.vessel.name)}</span><span class="meta" title="Selected effects score most (weighted by priority), then character and recommended effects; curses subtract when a penalty is set">score ${combo.points.toFixed(2)}</span></header>
-    <div class="goals">${goals}${curseChip}</div>
+    <header><span class="rank">#${i + 1}</span><span class="vname">${esc(combo.vessel.name)}</span><span class="meta" title="Wanted effects score most (weighted by priority), then character and recommended effects; avoided effects and curses subtract">score ${combo.points.toFixed(2)}</span></header>
+    <div class="goals">${comboGoals(combo, result)}</div>
     <div class="combo-grid">${cells}</div>
   </article>`;
 }
 
-/** Checklist of the selected goals for one combo (stacks reached), plus the curses it carries. */
+/** Checklist of the wanted effects for one combo (stacks reached), then avoided effects and other curses it carries. */
 function comboGoals(combo, result) {
   const effects = combo.relics.flatMap((r, slot) => (!r || (slot >= 3 && result.excludeDeep) ? [] : r.effects.flat()));
   const nf = state.combo.nightfarer;
   const usable = effects.filter((e) => e.nightfarer === undefined || e.nightfarer === nf);
-  const goals = result.entries
-    .filter((g) => g.maxStacks > 0)
-    .map((g) => {
-      const n = usable.filter((e) => e === g.effect || (g.effect.stacks && isSameGroupAndEqualOrBetter(g.effect, e))).length;
-      const ok = n >= Math.max(1, g.minStacks);
-      const optional = !ok && g.minStacks === 0; // nice-to-have that this combo doesn't include
-      const label = g.effect.name.replace(/^\[[^\]]+\] /, "");
-      const cls = ok ? "ok" : optional ? "opt" : "miss";
-      return `<span class="goal ${cls}" title="${esc(g.effect.name)}${optional ? " (optional)" : ""}">${ok ? "✓" : optional ? "○" : "✗"} ${esc(label)}${g.effect.stacks && n > 1 ? ` ×${n}` : ""}</span>`;
-    })
-    .join("");
-  const selectedKeys = new Set(result.entries.map((g) => g.effectKey));
-  const curses = effects.filter((e) => e.type === EffectType.Debuff && !selectedKeys.has(e.key));
-  return { goals, curses };
+  const matches = (effect, e) => e === effect || (effect.stacks && isSameGroupAndEqualOrBetter(effect, e));
+  const short = (e) => e.name.replace(/^\[[^\]]+\] /, "");
+  const goals = result.entries.map((g) => {
+    const n = usable.filter((e) => matches(g.effect, e)).length;
+    const ok = n >= Math.max(1, g.minStacks);
+    const optional = !ok && g.minStacks === 0; // nice-to-have that this combo doesn't include
+    const cls = ok ? "ok" : optional ? "opt" : "miss";
+    return `<span class="goal ${cls}" title="${esc(g.effect.name)}${g.minStacks > 0 ? " (required)" : ""}">${ok ? "✓" : optional ? "○" : "✗"} ${esc(short(g.effect))}${g.effect.stacks && n > 1 ? ` ×${n}` : ""}</span>`;
+  });
+  const avoided = result.avoided
+    .map((a) => [a, effects.filter((e) => matches(a.effect, e)).length])
+    .filter(([, n]) => n > 0)
+    .map(([a, n]) => `<span class="goal avoid" title="Avoided: ${esc(a.effect.name)}">▽ ${esc(short(a.effect))}${n > 1 ? ` ×${n}` : ""}</span>`);
+  const curses = effects.filter((e) => e.type === EffectType.Debuff && !result.avoided.some((a) => matches(a.effect, e)));
+  const curseChip = curses.length
+    ? `<span class="goal curse" title="${esc(curses.map((c) => c.name).join("\n"))}">⚠ ${curses.length} other curse${curses.length === 1 ? "" : "s"}</span>`
+    : (result.excludeDeep || avoided.length ? "" : '<span class="goal ok">No curses</span>');
+  return goals.join("") + avoided.join("") + curseChip;
 }
 
 // ---------------------------------------------------------------------------
@@ -794,6 +921,9 @@ function wireGlobalEvents() {
     if (f) loadFile(f);
     ev.target.value = "";
   });
+
+  const wantedEntry = (el) => state.combo.build?.wanted.find((e) => e.effectKey === Number(el.closest("[data-entry]")?.dataset.entry));
+  const avoidEntry = (el) => state.combo.build?.avoid.find((e) => e.effectKey === Number(el.closest("[data-avoid]")?.dataset.avoid));
 
   document.addEventListener("change", (ev) => {
     const t = ev.target;
@@ -814,33 +944,36 @@ function wireGlobalEvents() {
       state.browse[t.dataset.toggle] = t.checked;
       return renderBrowseGrid();
     }
-    if (t.matches("[data-build-select]")) return t.value ? loadBuild(t.value) : undefined;
-    if (t.matches("[data-rank]")) {
-      const key = Number(t.closest("[data-entry]").dataset.entry);
-      const entry = comboSettings().selectedEffects.find((e) => e.effectKey === key);
-      entry.rank = clampRank(t.value);
-      entry.weight = weightForRank(entry.rank);
+    if (t.matches("[data-want-rank]")) {
+      const entry = wantedEntry(t);
+      if (t.value === "req") {
+        entry.minStacks = Math.max(1, entry.minStacks);
+        entry.maxStacks = Math.max(entry.maxStacks, entry.minStacks);
+      } else {
+        entry.rank = clampRank(t.value);
+        entry.minStacks = 0;
+      }
       return comboChanged();
     }
+    if (t.matches("[data-avoid-rank]")) {
+      const entry = avoidEntry(t);
+      entry.block = t.value === "block";
+      if (!entry.block) entry.rank = clampRank(t.value);
+      return comboChanged();
+    }
+    // Re-sort once a stack slider is let go: it may have switched between required and ranked
+    if (t.dataset.range) return renderCombo();
     if (t.name === "nf") {
       state.combo.nightfarer = Number(t.value);
-      state.combo.loadedBuild = null;
+      state.combo.build = null;
+      state.combo.ui = {};
       state.combo.result = null;
-      return comboChanged();
-    }
-    if (t.dataset.vessel !== undefined) {
-      const s = comboSettings();
-      const i = Number(t.dataset.vessel);
-      s.disabledVessels = t.checked ? s.disabledVessels.filter((x) => x !== i) : [...s.disabledVessels, i];
-      return comboChanged();
+      saveNightfarer();
+      renderCombo();
+      return scheduleSearch();
     }
     if (t.dataset.combo === "include-deep") {
-      comboSettings().excludeDeepEffects = !t.checked;
-      if (!t.checked) {
-        // Curses only exist on deep relics; drop them when deep slots are off
-        const s = comboSettings();
-        s.selectedEffects = s.selectedEffects.filter((e) => state.gd.effectByKey(e.effectKey).type !== EffectType.Debuff);
-      }
+      state.combo.build.includeDeep = t.checked;
       return comboChanged();
     }
   });
@@ -849,21 +982,21 @@ function wireGlobalEvents() {
     const t = ev.target;
     if (!t.dataset.range) return;
     const li = t.closest("[data-entry]");
-    const key = Number(li.dataset.entry);
-    const entry = comboSettings().selectedEffects.find((e) => e.effectKey === key);
+    const entry = wantedEntry(t);
     const [minEl, maxEl] = li.querySelectorAll("input[type=range]");
     let lo = Number(minEl.value), hi = Number(maxEl.value);
     if (lo > hi) {
       if (t === minEl) hi = lo; else lo = hi;
       minEl.value = lo; maxEl.value = hi;
     }
+    // A minimum above 0 is what makes an effect required
     entry.minStacks = lo;
     entry.maxStacks = hi;
     // Update this row in place so the slider keeps focus while dragging
     const fresh = document.createElement("div");
-    fresh.innerHTML = pickedEffectRow(entry);
-    li.querySelector(".fill").replaceWith(fresh.querySelector(".fill"));
-    li.querySelector(".range-label").replaceWith(fresh.querySelector(".range-label"));
+    fresh.innerHTML = wantedRow(entry);
+    for (const sel of [".prio", ".fill", ".range-label"]) li.querySelector(sel).replaceWith(fresh.querySelector(sel));
+    li.classList.toggle("required", lo > 0);
     comboChanged({ rerender: false });
   });
 
@@ -885,18 +1018,31 @@ function wireGlobalEvents() {
       return renderBrowseGrid();
     }
     if (t.dataset.compare) return openCompare(t.dataset.compare);
+    const b = state.combo.build;
+    if (t.dataset.buildPick) {
+      if (t.dataset.buildPick === b?.id) return;
+      selectBuild(t.dataset.buildPick);
+      renderCombo();
+      return scheduleSearch();
+    }
     if (t.dataset.remove) {
-      const s = comboSettings();
-      s.selectedEffects = s.selectedEffects.filter((e) => e.effectKey !== Number(t.dataset.remove));
+      b.wanted = b.wanted.filter((e) => e.effectKey !== Number(t.dataset.remove));
       return comboChanged();
     }
-    if (t.dataset.curse) { comboSettings().cursePenalty = t.dataset.curse; return comboChanged(); }
-    if (t.dataset.build === "save") return saveBuild();
-    if (t.dataset.build === "confirm-save") return confirmSaveBuild();
-    if (t.dataset.build === "cancel-save") { state.combo.savingBuild = false; return renderCombo(); }
-    if (t.dataset.build === "delete") return deleteBuild();
-    if (t.dataset.combo === "all-vessels") { comboSettings().disabledVessels = []; return comboChanged(); }
-    if (t.dataset.combo === "no-vessels") { comboSettings().disabledVessels = nightfarer().vessels.map((_, i) => i); return comboChanged(); }
+    if (t.dataset.removeAvoid) {
+      b.avoid = b.avoid.filter((e) => e.effectKey !== Number(t.dataset.removeAvoid));
+      return comboChanged();
+    }
+    if (t.dataset.curse) { b.cursePenalty = t.dataset.curse; return comboChanged(); }
+    switch (t.dataset.build) {
+      case "new": return startNaming("creating");
+      case "rename": return startNaming("renaming");
+      case "duplicate": return startNaming("duplicating");
+      case "confirm-name": return confirmName();
+      case "delete": state.combo.ui = { confirmDelete: true }; return renderCombo();
+      case "confirm-delete": return deleteBuild();
+      case "cancel": state.combo.ui = {}; return renderCombo();
+    }
     if (t.dataset.action === "mark-seen") return markAllSeen();
     if (t.dataset.action === "copy-debug") return copyDebugReport();
     if (t.dataset.action === "back-live") return loadLive(state.saves[0].id);
@@ -904,8 +1050,8 @@ function wireGlobalEvents() {
 
   document.addEventListener("keydown", (ev) => {
     if (!ev.target.matches?.("[data-build-name]")) return;
-    if (ev.key === "Enter") { ev.preventDefault(); confirmSaveBuild(); }
-    if (ev.key === "Escape") { state.combo.savingBuild = false; renderCombo(); }
+    if (ev.key === "Enter") { ev.preventDefault(); confirmName(); }
+    if (ev.key === "Escape") { state.combo.ui = {}; renderCombo(); }
   });
 
   // Drag & drop a save anywhere

@@ -34,11 +34,13 @@ leaves your PC: the server only answers on localhost.
 - Relics are sorted like the in-game "Order Found", with the row and column where each one appears.
 - Duplicate and outclassed relics are flagged, with a side-by-side "keep this one" comparison.
 - NEW badges mark relics gained since your last visit.
-- **Combo Finder**: pick a Nightfarer, vessels and effects to get the 50 best loadouts.
-  - Per-effect min/max stacks (required or excluded) and a priority rank from 1 to 12.
-  - Curse penalty.
+- **Combo Finder**: pick a Nightfarer, then one of their builds, to get the 50 best loadouts across all of
+  their vessels.
+  - Builds can be created, renamed, duplicated and deleted, and every edit saves on its own.
+  - Wanted effects are **Required** or ranked 1 to 12. Stackable effects also get a stack range.
+  - Avoided effects (usually curses) are **Blocked** or avoided with a rank 1 to 12, plus a penalty for
+    curses that aren't listed.
   - Goal checklist on each result.
-  - Saved builds.
 
 ![Relic browser](docs/relics.jpg)
 

@@ -27,3 +27,9 @@ export function rankLabel(rank) {
   if (rank === MAX_RANK) return `${MAX_RANK} · lowest`;
   return String(rank);
 }
+
+/** Points lost for each copy of an avoided effect: half its rank's weight (rank 1 -1.5 ... rank 9 -0.5 ... rank 12 -0.125). */
+export const avoidPenaltyForRank = (rank) => weightForRank(rank) / 2;
+
+/** Scoring weight of a wanted effect. Required effects (at least one stack) score like rank 1. */
+export const wantedWeight = (entry) => (entry.minStacks > 0 ? weightForRank(1) : weightForRank(entry.rank));

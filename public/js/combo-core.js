@@ -23,6 +23,8 @@
 // Optimizer extensions (neutral unless the input sets them, so diff tests stay exact):
 //   input.effect_weights: [[effectKey, weight]] multiplies a selected effect's points (priority)
 //   input.curse_penalty:  points subtracted for each curse that is not itself selected
+//   input.avoid_weights:  [[effectKey, penalty]] points subtracted for each copy of an effect the build
+//                         avoids (replaces curse_penalty for that effect, and it never scores positively)
 
 import { Color, EffectType, isSameGroupAndEqualOrBetter, relicHasEffect } from "./game-data.js";
 
@@ -90,11 +92,12 @@ function filterRelics(relics, effects, enabledVessels, deep, blockedKeys, blocke
 /**
  * @param selectedEntries [{ effectKey, minStacks, maxStacks, weight? }]
  * @param cursePenalty    points lost per unselected curse (0 = upstream behavior)
+ * @param avoidEntries    [{ effectKey, penalty }] effects to steer away from without forbidding them
  * Returns { input, relics, deepRelics } where `input` is the plain, structured-cloneable
  * search input (same shape as upstream's WASM SearchInput) and relics/deepRelics map
  * result indices back to relic objects.
  */
-export function buildSearch(gd, { nightfarer, selectedEffects, relics, deepRelics, enabledVessels, selectedEntries, cursePenalty = 0 }) {
+export function buildSearch(gd, { nightfarer, selectedEffects, relics, deepRelics, enabledVessels, selectedEntries, cursePenalty = 0, avoidEntries = [] }) {
   const expanded = selectedEffects.flatMap(gd.stackableHigherLevel);
   // A priority set on "Physical Attack Up" applies to the +1..+4 levels it expands to
   const weights = new Map();
@@ -127,6 +130,14 @@ export function buildSearch(gd, { nightfarer, selectedEffects, relics, deepRelic
   };
   if (weights.size) input.effect_weights = [...weights];
   if (cursePenalty) input.curse_penalty = cursePenalty;
+  // Avoiding "Reduced Vigor" also avoids its stronger levels
+  const avoid = new Map();
+  for (const a of avoidEntries) {
+    const effect = gd.effectByKey(a.effectKey);
+    if (!effect || !(a.penalty > 0)) continue;
+    for (const e of gd.stackableHigherLevel(effect)) avoid.set(e.key, Math.max(avoid.get(e.key) ?? 0, a.penalty));
+  }
+  if (avoid.size) input.avoid_weights = [...avoid];
   return { input, relics: normal, deepRelics: deep };
 }
 
@@ -176,6 +187,8 @@ export function prepareSearch(input, { compat = false, upstreamGroupSpace = comp
   }
   const weight = new Float32Array(keySpace).fill(1);
   for (const [k, w] of input.effect_weights ?? []) if (k < keySpace) weight[k] = w;
+  const avoid = new Float32Array(keySpace);
+  for (const [k, p] of input.avoid_weights ?? []) if (k < keySpace) avoid[k] = p;
   const recommended = new Uint8Array(keySpace);
   for (const e of input.recommended_effects) if (e.key < keySpace) recommended[e.key] = 1;
 
@@ -209,6 +222,7 @@ export function prepareSearch(input, { compat = false, upstreamGroupSpace = comp
     weight,
     weighted: (input.effect_weights ?? []).some(([, w]) => w !== 1),
     cursePenalty: f(input.curse_penalty ?? 0),
+    avoid,
     groupDupForAll: upstreamGroupDuplicates,
     selGroup,
     selLevel,
@@ -241,7 +255,7 @@ export function prepareSearch(input, { compat = false, upstreamGroupSpace = comp
 
 function calcPoints(ctx, idx6) {
   const gen = ++ctx.gen;
-  const { keyGen, groupGen, keySpace, groupSpace, selected, recommended, nightfarer, groupDupForAll, weight, weighted, cursePenalty } = ctx;
+  const { keyGen, groupGen, keySpace, groupSpace, selected, recommended, nightfarer, groupDupForAll, weight, weighted, cursePenalty, avoid } = ctx;
   let points = 0;
   let sbMask = 0;
   for (let s = 0; s < 6; s++) {
@@ -270,8 +284,10 @@ function calcPoints(ctx, idx6) {
       const lvl = fx[o + 4];
       const mult = lvl >= 0 ? f(1 + f((3 - lvl) * PENALTY_MISSING_LEVEL)) : 1;
       const debuff = fx[o + 6] === 1;
-      if (debuff && !isSel && cursePenalty !== 0) points = f(points - cursePenalty);
-      if (!(debuff && !isSel)) {
+      const avoided = avoid[k];
+      if (avoided !== 0) points = f(points - avoided);
+      else if (debuff && !isSel && cursePenalty !== 0) points = f(points - cursePenalty);
+      if (avoided === 0 && !(debuff && !isSel)) {
         if (isSel) {
           const base = f((dup ? P_SELECTED_DUP : P_SELECTED) * mult);
           points = f(points + (weighted ? f(base * weight[k]) : base));
