@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { before, test } from "node:test";
-import { fromStored, signature, summary, toStored } from "../public/js/builds.js";
+import { familyName, familyOf, fromStored, signature, summary, toStored } from "../public/js/builds.js";
 import { buildSearch, runSearch } from "../public/js/combo-core.js";
-import { EffectType } from "../public/js/game-data.js";
+import { Color, EffectType } from "../public/js/game-data.js";
 import { avoidPenaltyForRank, wantedWeight, weightForRank } from "../public/js/priority.js";
-import { comboRequest, effectBySlug, fixture, loadCharacters, loadGameData } from "./helpers.mjs";
+import { comboRequest, effectBySlug, fixture, loadCharacters, loadGameData, makeRelic } from "./helpers.mjs";
 
 const gd = loadGameData();
 const SCHOLAR = 8;
@@ -80,4 +80,99 @@ test("a soft avoid steers away from an effect without forbidding it", () => {
   assert.ok(avoided.input.avoid_weights.some(([k]) => k === curse.key));
   assert.ok([...avoided.relics, ...avoided.deepRelics].some((r) => r.effects.flat().includes(curse)), "relics with it are still allowed");
   assert.ok(curseCount(avoided, curse) < curseCount(plain, curse));
+});
+
+test("effects that come in strengths form one family with a plain name", () => {
+  const pau2 = effectBySlug(gd, "physicalAttackUpPlus2");
+  assert.deepEqual(familyOf(gd, pau2).map((e) => e.level), [0, 1, 2, 3, 4]);
+  assert.equal(familyName(gd, pau2), "Physical Attack Up");
+  assert.equal(familyName(gd, effectBySlug(gd, "arcanePlus3")), "Arcane");
+  assert.equal(familyOf(gd, effectBySlug(gd, "itemsConferEffectToAllNearbyAllies")), null);
+});
+
+test("stacking families keep one entry; per-strength families keep a priority per strength", () => {
+  const { build } = fromStored(gd, {
+    id: "z", name: "Strengths", nightfarer: SCHOLAR,
+    effects: [
+      { slug: "defeatingEnemiesFillsMoreOfTheArtGauge", min: 1, max: 1, priority: "high" },
+      { slug: "defeatingEnemiesFillsMoreOfTheArtGaugePlus1", min: 1, max: 1, priority: "high" },
+      { slug: "improvedThrowingPotDamage", min: 0, rank: 3 },
+      { slug: "improvedThrowingPotDamagePlus1", min: 2, rank: 1 },
+    ],
+  });
+  const rows = build.wanted.map((e) => [gd.effectByKey(e.effectKey).slug, e.minStacks, e.maxStacks, e.rank]);
+  assert.deepEqual(rows, [
+    // each Art gauge strength is its own bonus, matched exactly
+    ["defeatingEnemiesFillsMoreOfTheArtGauge", 1, 1, 5],
+    ["defeatingEnemiesFillsMoreOfTheArtGaugePlus1", 1, 1, 5],
+    // pot damage stacks: one entry, "+1 or better", the required one wins
+    ["improvedThrowingPotDamagePlus1", 2, 10, 1],
+  ]);
+});
+
+test("a family that doesn't stack matches stronger levels when asked (or_better)", () => {
+  const base = effectBySlug(gd, "defeatingEnemiesFillsMoreOfTheArtGauge");
+  const plus1 = effectBySlug(gd, "defeatingEnemiesFillsMoreOfTheArtGaugePlus1");
+  assert.equal(base.stacks, false);
+  const red = { name: "Red x3", slots: [Color.Red, Color.Red, Color.Red, Color.Red, Color.Red, Color.Red] };
+  const req = (orBetter) => ({ nightfarer: SCHOLAR, selectedEffects: [base], relics: [makeRelic(gd, 102, plus1)], deepRelics: [], enabledVessels: [red],
+    selectedEntries: [{ effectKey: base.key, minStacks: 1, maxStacks: 10, orBetter }] });
+  assert.equal(runSearch(buildSearch(gd, req(false)).input).combinations.length, 0, "exact level only");
+  const found = runSearch(buildSearch(gd, req(true)).input).combinations;
+  assert.equal(found.length, 1);
+  assert.ok(found[0].points > 0.5, "the stronger level scores as wanted (lower levels score a bit less, as upstream)");
+});
+
+test("a max of 0 is an exclusion only in old builds; newer builds keep the effect wanted", () => {
+  const old = fromStored(gd, { id: "o", nightfarer: SCHOLAR, effects: [{ slug: "physicalAttackUpPlus2", min: 0, max: 0 }] }).build;
+  assert.equal(old.wanted.length, 0);
+  assert.equal(old.avoid[0].block, true);
+  const recent = fromStored(gd, { id: "n", nightfarer: SCHOLAR, effects: [{ slug: "physicalAttackUpPlus2", min: 0, max: 0, priority: 5 }], avoid: [] }).build;
+  assert.deepEqual(recent.wanted.map((e) => [e.minStacks, e.maxStacks, e.rank]), [[0, 10, 5]]);
+  assert.equal(recent.avoid.length, 0);
+});
+
+test("stacking.json corrects the game data's stacking flags", () => {
+  const raw = loadGameData({ raw: true });
+  for (const [slug, stacks] of [["increasedMaximumHP", false], ["staminaRecoveryUponLandingAttacks", false], ["improvedRoarAndBreathAttacksPlus1", true], ["continuousHpRecovery", true]]) {
+    assert.equal(effectBySlug(gd, slug).stacks, stacks, slug);
+    assert.equal(effectBySlug(raw, slug).stacks, !stacks, `${slug} (upstream)`);
+  }
+  assert.equal(effectBySlug(gd, "physicalAttackUp").stacks, true);
+});
+
+test("MMV effects: same name as a game effect stacks like it, else name patterns, else not", () => {
+  const mmv = loadGameData({ mmv: true }).effectsByKey.filter((e) => e?.mmv);
+  const byName = (n) => mmv.find((e) => e.name === `${n} (MMV)`);
+  assert.equal(byName("Continuous FP Recovery").stacks, true);
+  assert.equal(byName("Madness in Vicinity Improves Attack Power").stacks, false);
+  assert.ok(mmv.filter((e) => /in possession at start of expedition/.test(e.name)).every((e) => e.stacks));
+});
+
+test("requirements count different strengths of a non-stacking effect, not copies", () => {
+  const base = effectBySlug(gd, "defeatingEnemiesFillsMoreOfTheArtGauge");
+  const plus1 = effectBySlug(gd, "defeatingEnemiesFillsMoreOfTheArtGaugePlus1");
+  const red = { name: "Red x3", slots: [Color.Red, Color.Red, Color.Red, Color.Red, Color.Red, Color.Red] };
+  const search = (relics, min, options) => runSearch(buildSearch(gd, { nightfarer: SCHOLAR, selectedEffects: [base], relics, deepRelics: [], enabledVessels: [red],
+    selectedEntries: [{ effectKey: base.key, minStacks: min, maxStacks: 10, orBetter: true }] }).input, options).combinations;
+  const twoCopies = [makeRelic(gd, 102, plus1), makeRelic(gd, 102, plus1)];
+  assert.equal(search(twoCopies, 2).length, 0, "two +1 copies are one strength");
+  assert.ok(search(twoCopies, 2, { upstreamStackCounting: true, upstreamShortlist: true }).length > 0, "upstream counted copies");
+  const both = search([makeRelic(gd, 102, base), makeRelic(gd, 102, plus1)], 2);
+  assert.ok(both.length > 0 && both[0].idx6.slice(0, 3).filter((i) => i >= 0).length === 2, "base + +1 are two strengths");
+  // A non-stacking effect allowed once is not ruled out by a useless duplicate
+  const items = effectBySlug(gd, "itemsConferEffectToAllNearbyAllies");
+  const dup = buildSearch(gd, { nightfarer: SCHOLAR, selectedEffects: [items], relics: [makeRelic(gd, 102, items), makeRelic(gd, 102, items)], deepRelics: [], enabledVessels: [red],
+    selectedEntries: [{ effectKey: items.key, minStacks: 1, maxStacks: 1 }] });
+  assert.ok(runSearch(dup.input).combinations.some((c) => c.idx6.slice(0, 3).filter((i) => i >= 0).length === 2));
+});
+
+test("a per-strength family saved as 'this strength or stronger' gets a row per stronger strength", () => {
+  const { build } = fromStored(gd, { id: "i", nightfarer: SCHOLAR, avoid: [],
+    effects: [{ slug: "attackPowerUpWhenFacingPoisonAfflictedEnemy", min: 0, max: 10, priority: 4 }] });
+  assert.deepEqual(build.wanted.map((e) => [gd.effectByKey(e.effectKey).slug, e.minStacks, e.maxStacks, e.rank]), [
+    ["attackPowerUpWhenFacingPoisonAfflictedEnemy", 0, 1, 4],
+    ["attackPowerUpWhenFacingPoisonAfflictedEnemyPlus1", 0, 1, 4],
+    ["attackPowerUpWhenFacingPoisonAfflictedEnemyPlus2", 0, 1, 4],
+  ]);
 });

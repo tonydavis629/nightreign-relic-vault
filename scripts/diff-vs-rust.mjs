@@ -36,7 +36,7 @@ let seed = Number(seedArg);
 const rand = () => ((seed = (seed * 1103515245 + 12345) % 2 ** 31) / 2 ** 31);
 const pick = (arr) => arr[Math.floor(rand() * arr.length)];
 
-const gd = loadGameData();
+const gd = loadGameData({ raw: true }); // upstream's own stacking flags, as the Rust build sees them
 const characters = (await loadCharacters(save, gd)).filter((c) => c.relics.length > 0);
 let failures = 0, jsMs = 0, rustMs = 0;
 

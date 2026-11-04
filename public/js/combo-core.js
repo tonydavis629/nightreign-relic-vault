@@ -18,11 +18,17 @@
 //                            the best triples are also kept per requirement-coverage signature and
 //                            only halves that can jointly satisfy the requirements are paired, which
 //                            guarantees a valid build is found whenever one exists.
+//   upstreamStackCounting:   stack requirements counted every copy of a matching effect. A copy of
+//                            an effect that doesn't stack adds nothing in game, so by default those
+//                            count once per different strength (base and +1 count 2, two +1 count 1),
+//                            while stacking effects still count every copy.
 // `compat: true` turns all of these on.
 //
 // Optimizer extensions (neutral unless the input sets them, so diff tests stay exact):
 //   input.effect_weights: [[effectKey, weight]] multiplies a selected effect's points (priority)
 //   input.curse_penalty:  points subtracted for each curse that is not itself selected
+//   ranges[].or_better:   count every level >= the selected one, also for effects that don't stack
+//                         (upstream only did that for stacking effects)
 //   input.avoid_weights:  [[effectKey, penalty]] points subtracted for each copy of an effect the build
 //                         avoids (replaces curse_penalty for that effect, and it never scores positively)
 
@@ -90,7 +96,8 @@ function filterRelics(relics, effects, enabledVessels, deep, blockedKeys, blocke
 }
 
 /**
- * @param selectedEntries [{ effectKey, minStacks, maxStacks, weight? }]
+ * @param selectedEntries [{ effectKey, minStacks, maxStacks, weight?, orBetter? }]
+ *                        orBetter: any level of the effect's group at or above this one counts
  * @param cursePenalty    points lost per unselected curse (0 = upstream behavior)
  * @param avoidEntries    [{ effectKey, penalty }] effects to steer away from without forbidding them
  * Returns { input, relics, deepRelics } where `input` is the plain, structured-cloneable
@@ -98,13 +105,17 @@ function filterRelics(relics, effects, enabledVessels, deep, blockedKeys, blocke
  * result indices back to relic objects.
  */
 export function buildSearch(gd, { nightfarer, selectedEffects, relics, deepRelics, enabledVessels, selectedEntries, cursePenalty = 0, avoidEntries = [] }) {
-  const expanded = selectedEffects.flatMap(gd.stackableHigherLevel);
+  const orBetter = new Set(selectedEntries.filter((e) => e.orBetter).map((e) => e.effectKey));
+  const levels = (effect) => (orBetter.has(effect.key) && effect.level !== undefined
+    ? gd.effectsByKey.filter((e) => e && !e.unknown && isSameGroupAndEqualOrBetter(effect, e))
+    : gd.stackableHigherLevel(effect));
+  const expanded = selectedEffects.flatMap(levels);
   // A priority set on "Physical Attack Up" applies to the +1..+4 levels it expands to
   const weights = new Map();
   for (const effect of selectedEffects) {
     const w = selectedEntries.find((e) => e.effectKey === effect.key)?.weight ?? 1;
     if (w === 1) continue;
-    for (const e of gd.stackableHigherLevel(effect)) weights.set(e.key, Math.max(weights.get(e.key) ?? 0, w));
+    for (const e of levels(effect)) weights.set(e.key, Math.max(weights.get(e.key) ?? 0, w));
   }
   const expandedKeys = new Set(expanded.map((e) => e.key));
   const recommended = (gd.recommended[nightfarer] ?? []).filter((e) => !expandedKeys.has(e.key));
@@ -126,7 +137,7 @@ export function buildSearch(gd, { nightfarer, selectedEffects, relics, deepRelic
     relics: normal.map((r) => ({ color: r.color, effects: r.effects.map(([e]) => toEffect(e)) })),
     deep_relics: deep.map((r) => ({ color: r.color, effects: r.effects.flat().map(toEffect) })),
     enabled_vessels: enabledVessels.map((v) => v.slots),
-    selected_effect_ranges: selectedEntries.map((e) => ({ effect_key: e.effectKey, min_stacks: e.minStacks, max_stacks: e.maxStacks })),
+    selected_effect_ranges: selectedEntries.map((e) => ({ effect_key: e.effectKey, min_stacks: e.minStacks, max_stacks: e.maxStacks, ...(e.orBetter && { or_better: true }) })),
   };
   if (weights.size) input.effect_weights = [...weights];
   if (cursePenalty) input.curse_penalty = cursePenalty;
@@ -166,7 +177,7 @@ function packTriple(a, b, c) {
 // 60-bit key in upstream; a JS number only holds 53 bits exactly, so use a string.
 const key6 = (i) => `${packTriple(i[0], i[1], i[2])}:${packTriple(i[3], i[4], i[5])}`;
 
-export function prepareSearch(input, { compat = false, upstreamGroupSpace = compat, upstreamEffectLimits = compat, upstreamGroupDuplicates = compat, upstreamShortlist = compat } = {}) {
+export function prepareSearch(input, { compat = false, upstreamGroupSpace = compat, upstreamEffectLimits = compat, upstreamGroupDuplicates = compat, upstreamShortlist = compat, upstreamStackCounting = compat } = {}) {
   const maxKey = Math.max(
     0,
     ...[input.selected_effects, input.recommended_effects, ...input.relics.map((r) => r.effects), ...input.deep_relics.map((r) => r.effects)]
@@ -199,20 +210,44 @@ export function prepareSearch(input, { compat = false, upstreamGroupSpace = comp
     return lists;
   };
 
-  const ranges = (input.selected_effect_ranges ?? []).map((r) => [r.effect_key, r.min_stacks, r.max_stacks]);
+  const ranges = (input.selected_effect_ranges ?? []).map((r) => [r.effect_key, r.min_stacks, r.max_stacks, r.or_better === true]);
   const normal = input.relics.map(packRelic);
   const deep = input.deep_relics.map(packRelic);
 
-  // Requirement signature dimensions: ranges with a minimum, or a small maximum.
+  // Per range: a bit for each different non-stacking effect that matches it (each counts once)
+  const distinct = !upstreamStackCounting;
+  const bitOf = ranges.map(() => new Map());
+  if (distinct) {
+    const probe = { ranges, nightfarer: input.nightfarer, selGroup, selLevel, keySpace };
+    const seen = ranges.map(() => []);
+    for (const fx of [...normal, ...deep]) {
+      for (let o = 0; o < fx.length; o += FIELDS) {
+        if (fx[o + 2] === 1) continue; // stacks: counted per copy
+        for (let i = 0; i < ranges.length; i++) {
+          if (matchesRange(probe, i, fx, o) && !seen[i].some((x) => x[0] === fx[o])) seen[i].push([fx[o], fx[o + 4]]);
+        }
+      }
+    }
+    seen.forEach((list, i) => list.sort((a, b) => a[1] - b[1] || a[0] - b[0]).forEach(([k], b) => bitOf[i].set(k, Math.min(b, 7))));
+  }
+
+  // Requirement signature dimensions: ranges with a minimum, or a small maximum. A dimension holds
+  // the stacking copies (capped) plus the exact set of non-stacking strengths, so two halves can be
+  // combined without counting the same strength twice.
   const dims = [];
   if (!upstreamShortlist) {
     ranges.forEach(([, min, max], i) => {
       const trackMax = max < TRACK_MAX_BELOW;
-      if (min > 0 || trackMax) dims.push({ range: i, min, max: trackMax ? max : Infinity, cap: trackMax ? max : min });
+      if (min > 0 || trackMax) dims.push({ range: i, min, max: trackMax ? max : Infinity, cap: trackMax ? max : min, bits: Math.min(bitOf[i].size, 8) });
     });
   }
   let radix = 1;
-  for (const d of dims) { d.radix = radix; radix *= d.cap + 1; }
+  for (let d = 0; d < dims.length; d++) {
+    const span = (dims[d].cap + 1) * 2 ** dims[d].bits;
+    if (radix * span > 2 ** 52) { dims.length = d; break; } // keep signatures exact numbers; later dims are only checked at the end
+    dims[d].radix = radix;
+    radix *= span;
+  }
 
   const ctx = {
     nightfarer: input.nightfarer,
@@ -236,16 +271,18 @@ export function prepareSearch(input, { compat = false, upstreamGroupSpace = comp
     byColorDeep: byColor(input.deep_relics),
     vessels: input.enabled_vessels,
     ranges,
+    bitOf,
+    distinct,
     tooMany: upstreamEffectLimits && (input.selected_effects.length > 27 || input.recommended_effects.length > 35),
     keyGen: new Uint32Array(keySpace),
     groupGen: new Uint32Array(groupSpace),
     gen: 0,
   };
   if (dims.length) {
-    // Per relic: how many stacks it contributes to each tracked requirement
+    // Per relic and tracked requirement: stacking copies it adds, and its non-stacking strengths
     const perRelic = (fx) => {
-      const all = rangeCounts(ctx, [fx]);
-      return Uint8Array.from(dims, (d) => all[d.range]);
+      const { stacked, masks } = rangeTally(ctx, [fx]);
+      return { s: Uint8Array.from(dims, (d) => stacked[d.range]), m: Uint8Array.from(dims, (d) => masks[d.range]) };
     };
     ctx.reqNormal = normal.map(perRelic);
     ctx.reqDeep = deep.map(perRelic);
@@ -302,27 +339,42 @@ function calcPoints(ctx, idx6) {
   return points;
 }
 
-/** Stack counts per requested range for a list of packed relics (combination_satisfies_ranges). */
-function rangeCounts(ctx, relicFx) {
-  const { ranges, nightfarer, selGroup, selLevel, keySpace } = ctx;
-  const counts = new Uint8Array(ranges.length);
+/** Does the effect at fx[o] count toward range i (that effect, or a better level of its group)? */
+function matchesRange(ctx, i, fx, o) {
+  const nf = fx[o + 1];
+  if (nf >= 0 && nf !== ctx.nightfarer) return false;
+  const want = ctx.ranges[i][0];
+  const k = fx[o];
+  if (k === want) return true;
+  if (want >= ctx.keySpace) return false;
+  const g = fx[o + 3], l = fx[o + 4], stacks = fx[o + 2] === 1;
+  const sg = ctx.selGroup[want], sl = ctx.selLevel[want];
+  return sg >= 0 && sl >= 0 && g >= 0 && l >= 0 && (stacks || ctx.ranges[i][3]) && g === sg && l >= sl;
+}
+
+const POPCOUNT = Uint8Array.from({ length: 256 }, (_, n) => { let c = 0; for (let x = n; x; x >>= 1) c += x & 1; return c; });
+
+/** Per range: copies of stacking matches, and a bitmask of the different non-stacking matches. */
+function rangeTally(ctx, relicFx) {
+  const { ranges, distinct, bitOf } = ctx;
+  const stacked = new Uint8Array(ranges.length);
+  const masks = new Uint8Array(ranges.length);
   for (const fx of relicFx) {
     for (let o = 0; o < fx.length; o += FIELDS) {
-      const nf = fx[o + 1];
-      if (nf >= 0 && nf !== nightfarer) continue;
-      const k = fx[o], g = fx[o + 3], l = fx[o + 4], stacks = fx[o + 2] === 1;
       for (let i = 0; i < ranges.length; i++) {
-        const want = ranges[i][0];
-        let match = k === want;
-        if (!match && want < keySpace) {
-          const sg = selGroup[want], sl = selLevel[want];
-          if (sg >= 0 && sl >= 0 && g >= 0 && l >= 0 && stacks && g === sg && l >= sl) match = true;
-        }
-        if (match && counts[i] < 255) counts[i]++;
+        if (!matchesRange(ctx, i, fx, o)) continue;
+        if (distinct && fx[o + 2] !== 1) masks[i] |= 1 << (bitOf[i].get(fx[o]) ?? 7);
+        else if (stacked[i] < 255) stacked[i]++;
       }
     }
   }
-  return counts;
+  return { stacked, masks };
+}
+
+/** Stack counts per requested range for a list of packed relics (combination_satisfies_ranges). */
+function rangeCounts(ctx, relicFx) {
+  const { stacked, masks } = rangeTally(ctx, relicFx);
+  return stacked.map((n, i) => Math.min(255, n + POPCOUNT[masks[i]]));
 }
 
 function satisfiesRanges(ctx, idx6) {
@@ -379,12 +431,14 @@ function searchGroup(ctx, slotColors, deep) {
     top.offer(t, points);
     if (!buckets) return;
     let sig = 0;
-    const vals = new Uint8Array(dims.length);
+    const vals = { s: new Uint8Array(dims.length), m: new Uint8Array(dims.length) };
     for (let d = 0; d < dims.length; d++) {
-      const v = (t[0] >= 0 ? req[t[0]][d] : 0) + (t[1] >= 0 ? req[t[1]][d] : 0) + (t[2] >= 0 ? req[t[2]][d] : 0);
-      if (v > dims[d].max) return; // this half alone already breaks a max — never valid
-      vals[d] = Math.min(v, dims[d].cap);
-      sig += vals[d] * dims[d].radix;
+      let n = 0, m = 0;
+      for (let j = 0; j < 3; j++) if (t[j] >= 0) { n += req[t[j]].s[d]; m |= req[t[j]].m[d]; }
+      if (n + POPCOUNT[m] > dims[d].max) return; // this half alone already breaks a max — never valid
+      vals.s[d] = Math.min(n, dims[d].cap);
+      vals.m[d] = m;
+      sig += (vals.s[d] + (dims[d].cap + 1) * m) * dims[d].radix;
     }
     let b = buckets.get(sig);
     if (!b) buckets.set(sig, (b = { vals, top: new TopK(BUCKET_RESULTS) }));
@@ -465,7 +519,7 @@ function searchGroup(ctx, slotColors, deep) {
     // An empty half (signature all zero) so the other half can still be paired with nothing
     const empty = new TopK(1);
     empty.offer([-1, -1, -1], 0);
-    buckets.set(0, { vals: new Uint8Array(dims.length), top: empty });
+    buckets.set(0, { vals: { s: new Uint8Array(dims.length), m: new Uint8Array(dims.length) }, top: empty });
   }
   return { triples: top.items, checked, buckets };
 }
@@ -497,7 +551,10 @@ export function searchVessels(ctx, vesselIndices) {
       if (n.buckets) {
         // Pair only halves whose requirement signatures can add up to a valid build
         const dims = ctx.dims;
-        const fits = (a, b) => dims.every((dim, i) => a[i] + b[i] >= dim.min && a[i] + b[i] <= dim.max);
+        const fits = (a, b) => dims.every((dim, i) => {
+          const n = a.s[i] + b.s[i] + POPCOUNT[a.m[i] | b.m[i]];
+          return n >= dim.min && n <= dim.max;
+        });
         for (const bn of n.buckets.values()) {
           for (const bd of d.buckets.values()) {
             if (!fits(bn.vals, bd.vals)) continue;

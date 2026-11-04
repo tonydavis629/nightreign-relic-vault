@@ -383,7 +383,8 @@ mark { background: #ffd700; color: #000; border-radius: 2px; padding: 0 1px; }
 .goal.ok { color: var(--good); border-color: rgba(121, 212, 148, 0.3); }
 .goal.miss { color: var(--danger); border-color: rgba(255, 107, 98, 0.35); }
 .goal.opt { color: var(--faint); }
-.goal.curse { color: var(--curse); border-color: rgba(134, 182, 226, 0.4); cursor: help; }
+.goal.curse { color: var(--curse); border-color: rgba(134, 182, 226, 0.4); }
+.goal-curses { display: flex; flex-wrap: wrap; gap: 5px; flex-basis: 100%; }
 .goal.avoid { color: #f0a35e; border-color: rgba(240, 163, 94, 0.4); }
 
 /* ---------- dialog ---------- */
@@ -428,3 +429,31 @@ mark { background: #ffd700; color: #000; border-radius: 2px; padding: 0 1px; }
   *, *::before, *::after { animation: none !important; transition: none !important; }
   .banner.play { opacity: 1; } /* still announced, just without motion (JS hides it) */
 }
+
+/* strength (minimum level) slider for effects that come in +1, +2 ... */
+.strength { margin-top: 4px; }
+.strength .lvl { color: var(--gold-hi); font-weight: 600; font-size: 12px; }
+.step-range { position: relative; padding: 0 2px; }
+.step-range input[type="range"] { width: 100%; margin: 2px 0 0; appearance: none; height: 16px; background: none; }
+.step-range input[type="range"]::-webkit-slider-runnable-track { height: 3px; border-radius: 2px; background: var(--line-2); }
+.step-range input[type="range"]::-moz-range-track { height: 3px; border-radius: 2px; background: var(--line-2); }
+.step-range input[type="range"]::-webkit-slider-thumb { appearance: none; margin-top: -5px; width: 13px; height: 13px; transform: rotate(45deg); border-radius: 2px; background: var(--gold); border: 2px solid #2a1d07; }
+.step-range input[type="range"]::-moz-range-thumb { width: 11px; height: 11px; border-radius: 2px; background: var(--gold); border: 2px solid #2a1d07; }
+.step-range .ticks { display: flex; justify-content: space-between; font-size: 10px; color: var(--faint); margin-top: 1px; }
+.step-range .ticks span { opacity: 0.55; }
+.step-range .ticks span.in { opacity: 1; }
+.step-range .ticks span.own { color: var(--text); }
+.step-range .ticks span.own.in { color: var(--gold-hi); }
+
+/* how an effect stacks (from data/stacking.json + game data) */
+.stack-tag { margin-left: auto; font-size: 10.5px; white-space: nowrap; color: var(--good); border: 1px solid rgba(121, 212, 148, 0.3); border-radius: 999px; padding: 0 7px; cursor: help; }
+.stack-tag.no { color: var(--muted); border-color: var(--line-2); }
+
+/* per-strength family card: a priority for each strength */
+.picked li.family .opt-row .stack-tag { margin-left: auto; }
+.level-rows { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; }
+.level-row { display: grid; grid-template-columns: 44px auto 1fr; align-items: center; gap: 8px; font-size: 12px; }
+.level-row .tick { font: 11px var(--mono); color: var(--faint); }
+.level-row .tick.own { color: var(--text); }
+.level-row.off .rank-select { color: var(--faint); }
+.level-row.off .pips { opacity: 0.35; }

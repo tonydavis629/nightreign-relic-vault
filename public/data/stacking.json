@@ -1,0 +1,40 @@
+{
+  "source": "https://docs.google.com/spreadsheets/d/1meXOw4jR1hh7YXVMeijWwSDIXnCw6Tk4hTZPq2qvyK4 (community relic stacking sheet, \"Stackable with self?\" column)",
+  "notes": [
+    "stacks: true = copies of the same effect add up. stacks: false = a second copy of the same effect does nothing, but different strengths of it (\"+1\", \"+2\") still add up.",
+    "effects: corrections to game-data.json, which comes from upstream RelicBrowser.",
+    "Character Skill Cooldown, Ultimate Art Auto Charge and Poise +4/+5 came after the sheet (it lists +1/2/3 as stacking); assumed to stack like the rest of their family.",
+    "mmv: More Map Variations effects aren't in the sheet. An MMV effect with the same name as a game effect copies its rule; otherwise the first matching pattern wins; otherwise it doesn't stack."
+  ],
+  "effects": {
+    "increasedMaximumHP": false,
+    "increasedMaximumFP": false,
+    "increasedMaximumStamina": false,
+    "hpRestoredWhenUsingMedicinalBolusesEtcPlus1": false,
+    "hpRestoredWhenUsingMedicinalBolusesEtcPlus2": false,
+    "staminaRecoveryUponLandingAttacks": false,
+    "improvedRoarAndBreathAttacksPlus1": true,
+    "improvedRoarAndBreathAttacksPlus2": true,
+    "continuousHpRecovery": true,
+    "characterSkillCooldownReductionPlus4": true,
+    "characterSkillCooldownReductionPlus5": true,
+    "ultimateArtAutoChargePlus4": true,
+    "ultimateArtAutoChargePlus5": true,
+    "poisePlus4": true,
+    "poisePlus5": true
+  },
+  "mmv": [
+    ["in possession at start of expedition", true],
+    ["^(Vigor|Mind|Endurance|Strength|Dexterity|Intelligence|Faith|Arcane|Poise) \\+\\d", true],
+    ["^(Physical|Magic|Fire|Lightning|Holy) Attack (Power )?Up", true],
+    ["Damage Negation Up$", true],
+    ["^Improved .*Resistance", true],
+    ["^Improved .*(Sorcery|Sorceries|Incantations?)$", true],
+    ["^Improved .*Attack Power$", true],
+    ["^Improved (Throwing|Perfuming|Glintstone|Guard Counters|Initial Standard Attack|Roar)", true],
+    ["^Character Skill Cooldown Reduction", true],
+    ["^Ultimate Art Auto Charge", true],
+    ["^Continuous (HP|FP) Recovery", true],
+    ["^Increased rune acquisition", true]
+  ]
+}

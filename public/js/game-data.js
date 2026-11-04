@@ -11,21 +11,29 @@ export const EffectType = Object.freeze({ Buff: 0, Debuff: 1 });
  * Turns the raw JSON into fast lookup tables.
  * Effects are interned: one object per effect key, so identity comparison == key comparison.
  */
-export function createGameData(json, mmv = null) {
+export function createGameData(json, mmv = null, stacking = null) {
+  // Stacking corrections from the community sheet (data/stacking.json), applied over upstream's flags
+  const fixes = stacking?.effects ?? {};
   const effectsByKey = [];
-  for (const def of Object.values(json.effects)) effectsByKey[def.key] = Object.freeze({ ...def });
+  for (const def of Object.values(json.effects)) {
+    effectsByKey[def.key] = Object.freeze({ ...def, ...(typeof fixes[def.slug] === "boolean" && { stacks: fixes[def.slug] }) });
+  }
   const knownEffectCount = effectsByKey.length;
 
   const effectsById = new Map();
   for (const [id, key] of Object.entries(json.effectIdToKey)) effectsById.set(Number(id), effectsByKey[key]);
 
-  // Effects only the More Map Variations mod has (data/mmv-names.json). Their stacking rules
-  // aren't known, so they count once per vessel. Keys follow id order so saved builds stay valid.
+  // Effects only the More Map Variations mod has (data/mmv-names.json). Their stacking rules aren't
+  // documented: one named like a game effect stacks like it, else stacking.json's name patterns
+  // decide, else it counts once. Keys follow id order so saved builds stay valid.
   const nightfarerIds = new Map(json.nightfarers.map((nf) => [nf.name.toLowerCase(), nf.id]));
+  const stacksByName = new Map(effectsByKey.filter(Boolean).map((e) => [e.name.toLowerCase(), e.stacks === true]));
+  const mmvPatterns = (stacking?.mmv ?? []).map(([re, v]) => [new RegExp(re, "i"), v]);
+  const mmvStacks = (name) => stacksByName.get(name.toLowerCase()) ?? mmvPatterns.find(([re]) => re.test(name))?.[1] ?? false;
   for (const [id, name] of Object.entries(mmv?.effects ?? {}).sort(([a], [b]) => a - b)) {
     if (effectsById.has(Number(id))) continue;
     const nf = nightfarerIds.get(name.match(/^\[(\w+)\]/)?.[1].toLowerCase());
-    const def = Object.freeze({ key: effectsByKey.length, slug: `mmv${id}`, name: `${name} (MMV)`, ...(nf !== undefined && { nightfarer: nf }), stacks: false, maxLevel: true, mmv: true });
+    const def = Object.freeze({ key: effectsByKey.length, slug: `mmv${id}`, name: `${name} (MMV)`, ...(nf !== undefined && { nightfarer: nf }), stacks: mmvStacks(name), maxLevel: true, mmv: true });
     effectsByKey.push(def);
     effectsById.set(Number(id), def);
   }

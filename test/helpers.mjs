@@ -7,8 +7,11 @@ import { buildCharacter } from "../public/js/model.js";
 const root = new URL("..", import.meta.url);
 export const fixture = (name) => fileURLToPath(new URL(`test/fixtures/${name}`, root));
 
-export function loadGameData() {
-  return createGameData(JSON.parse(readFileSync(new URL("public/data/game-data.json", root), "utf8")));
+const readJson = (path) => JSON.parse(readFileSync(new URL(path, root), "utf8"));
+
+/** Game data as the page loads it: stacking corrections applied. `raw: true` gives upstream's flags (for diff tests). */
+export function loadGameData({ raw = false, mmv = false } = {}) {
+  return createGameData(readJson("public/data/game-data.json"), mmv ? readJson("public/data/mmv-names.json") : null, raw ? null : readJson("public/data/stacking.json"));
 }
 
 export async function loadCharacters(file, gd = loadGameData()) {

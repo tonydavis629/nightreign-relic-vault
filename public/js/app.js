@@ -1,9 +1,9 @@
 // Relic Vault — main UI.
 import { buildSearch } from "./combo-core.js";
 import { SearchCancelled, cancelSearch, lastDiagnostics, searchCombos } from "./combo-client.js";
-import { Color, EffectType, ItemType, RELIC_COLORS, createGameData, isSameGroup, isSameGroupAndEqualOrBetter, relicEffectCount, relicHasEffect } from "./game-data.js";
+import { Color, EffectType, ItemType, RELIC_COLORS, createGameData, isSameGroup, isSameGroupAndEqualOrBetter } from "./game-data.js";
 import { availableEffects as computeAvailableEffects, buildCharacter } from "./model.js";
-import { emptyBuild, fromStored, newAvoid, newWanted, signature, summary, toStored } from "./builds.js";
+import { emptyBuild, familyName, familyOf, fitStacks, fromStored, newAvoid, newWanted, orBetterFamily, perStrength, signature, summary, toStored } from "./builds.js";
 import { MAX_RANK, avoidPenaltyForRank, clampRank, rankLabel, wantedWeight, weightForRank } from "./priority.js";
 import { SaveParseError, parseSave } from "./save-parser.js";
 import { $, banner, colorChip, effectPicker, esc, relicCard, timeAgo, toast } from "./ui.js";
@@ -77,7 +77,8 @@ async function boot() {
   try {
     // Optional overlay with names for effects only the More Map Variations mod has
     const mmv = await fetch("data/mmv-names.json").then((r) => (r.ok ? r.json() : null), () => null);
-    state.gd = createGameData(await (await fetch("data/game-data.json")).json(), mmv);
+    const stacking = await fetch("data/stacking.json").then((r) => (r.ok ? r.json() : null), () => null);
+    state.gd = createGameData(await (await fetch("data/game-data.json")).json(), mmv, stacking);
     state.presets = await fetch("data/presets.json").then((r) => (r.ok ? r.json() : []), () => []);
   } catch (err) {
     return showFatal(`Could not load game data (data/game-data.json): ${err.message}`);
@@ -396,39 +397,89 @@ function selectableEffects() {
       (e.nightfarer === undefined || e.nightfarer === nf || ALWAYS_SELECTABLE.has(e.slug)))
     .sort((a, b) => (b.nightfarer === nf) - (a.nightfarer === nf) || Boolean(a.mmv) - Boolean(b.mmv) || a.name.localeCompare(b.name, undefined, { numeric: true }));
 }
-const wantOptions = () => selectableEffects().filter((e) => e.type !== EffectType.Debuff);
+/** Wanted-effect choices: one entry per strength family (its weakest level), none already in the build. */
+function wantOptions() {
+  const taken = new Set((state.combo.build?.wanted ?? []).map((w) => state.gd.effectByKey(w.effectKey)).filter((e) => familyOf(state.gd, e)).map((e) => e.group));
+  const out = [];
+  for (const e of selectableEffects()) {
+    if (e.type === EffectType.Debuff) continue;
+    const family = familyOf(state.gd, e);
+    if (!family) { out.push(e); continue; }
+    if (taken.has(e.group)) continue;
+    taken.add(e.group);
+    out.push(family[0]);
+  }
+  return out;
+}
+/** Picker label: families by their plain name, since strength is chosen on the card. */
+const wantLabel = (e) => (familyOf(state.gd, e) ? familyName(state.gd, e) : effectLabel(e));
+/** This effect or (for a family) any stronger level, as the search counts it. */
+const atLeast = (e) => (orBetterFamily(state.gd, e) ? familyOf(state.gd, e).filter((m) => m === e || m.level >= e.level) : [e]);
+const owned = (e) => atLeast(e).some(inRelics);
 // Curses first, then anything else a build might want to keep out
 const avoidOptions = () => {
   const all = selectableEffects();
   return [...all.filter((e) => e.type === EffectType.Debuff), ...all.filter((e) => e.type !== EffectType.Debuff)];
 };
 const inRelics = (e) => availableEffects(character()).includes(e);
-const notInRelicsHint = (e) => (inRelics(e) ? "" : "not in your relics");
+const notInRelicsHint = (e) => (owned(e) ? "" : "not in your relics");
 
-/** Most copies of `effect` that one vessel could hold with this character's relics. */
+// ---------------------------------------------------------------------------
+// Stacking, as the search counts it (data/stacking.json corrects the game data): every copy of an
+// effect that stacks counts; an effect that doesn't stack counts once per different strength.
+// ---------------------------------------------------------------------------
+/** Does relic effect `e` count toward the wanted `effect` (itself, or a stronger level of its family)? */
+const countsToward = (effect, e) => e === effect || (!perStrength(state.gd, effect) && (e.stacks || familyOf(state.gd, effect)) && isSameGroupAndEqualOrBetter(effect, e));
+
+/** How many times `effects` (from one combo) count toward `effect`. */
+function stackCount(effect, effects) {
+  let n = 0;
+  const once = new Set();
+  for (const e of effects) {
+    if (!countsToward(effect, e)) continue;
+    if (e.stacks) n++;
+    else if (!once.has(e)) { once.add(e); n++; }
+  }
+  return n;
+}
+
+/** "stacks", "only different strengths stack", or "doesn't stack", for the strengths that count. */
+function stackRule(effect) {
+  const levels = atLeast(effect);
+  const stacking = levels.filter((e) => e.stacks).length;
+  if (stacking === levels.length) return { tag: "stacks", count: true, title: "Every copy adds up" };
+  if (stacking === 0) {
+    return levels.length > 1
+      ? { tag: "strengths stack", count: true, title: "A second copy of the same strength does nothing, but different strengths add up" }
+      : { tag: "doesn't stack", count: false, title: "A second copy does nothing" };
+  }
+  return { tag: "partly stacks", count: true, title: `Copies of ${levels.filter((e) => e.stacks).map(strengthTick).join(", ")} add up; ${levels.filter((e) => !e.stacks).map(strengthTick).join(", ")} count once each` };
+}
+
+/** Most counts of `effect` one vessel could reach with this character's relics (greedy per slot). */
 function maxStacksFor(effect) {
-  if (effect.stacks !== true) return 1;
+  if (!stackRule(effect).count) return 1;
   const c = character();
   const deepOff = !state.combo.build?.includeDeep;
-  const normal = c.relics.filter((r) => !r.isDeep && relicHasEffect(r, effect));
-  const deep = c.relics.filter((r) => r.isDeep && relicHasEffect(r, effect));
+  const nf = state.combo.nightfarer;
+  const usable = (r) => r.effects.flat().filter((e) => (e.nightfarer === undefined || e.nightfarer === nf) && countsToward(effect, e));
+  const normal = c.relics.filter((r) => !r.isDeep && usable(r).length);
+  const deep = c.relics.filter((r) => r.isDeep && usable(r).length);
   let best = 0;
   for (const vessel of nightfarer().vessels) {
-    const used = [];
-    let total = 0;
+    const picked = [];
     vessel.slots.forEach((slot, i) => {
       if (i >= 3 && deepOff) return;
-      const pool = (i >= 3 ? deep : normal).filter((r) => slot === Color.Any || r.color === slot);
-      let max = 0, pick;
+      const pool = (i >= 3 ? deep : normal).filter((r) => (slot === Color.Any || r.color === slot) && !picked.includes(r));
+      const now = stackCount(effect, picked.flatMap(usable));
+      let gain = 0, pick;
       for (const r of pool) {
-        if (used.includes(r)) continue;
-        const n = relicEffectCount(r, effect);
-        if (n > max) { max = n; pick = r; }
+        const g = stackCount(effect, [...picked, r].flatMap(usable)) - now;
+        if (g > gain) { gain = g; pick = r; }
       }
-      total += max;
-      if (pick) used.push(pick);
+      if (pick) picked.push(pick);
     });
-    best = Math.max(best, total);
+    best = Math.max(best, stackCount(effect, picked.flatMap(usable)));
   }
   return best;
 }
@@ -463,7 +514,7 @@ function selectBuild(id, { quiet = false } = {}) {
   store.set("combo.active", { ...store.get("combo.active", {}), [build.nightfarer]: id });
   saveNightfarer();
   if (quiet) return;
-  const absent = build.wanted.filter((e) => !inRelics(state.gd.effectByKey(e.effectKey))).length;
+  const absent = build.wanted.filter((e) => !owned(state.gd.effectByKey(e.effectKey))).length;
   const notes = [
     absent && `${absent} wanted effect${absent === 1 ? " isn't" : "s aren't"} on ${character().name}'s relics`,
     missing && `${missing} unknown effect(s) skipped`,
@@ -576,7 +627,7 @@ function addWanted(effect) {
     if (e.startingBonus !== undefined && e.startingBonus === effect.startingBonus) return false;
     return true;
   });
-  b.wanted.push(newWanted(effect));
+  b.wanted.push(newWanted(state.gd, effect));
   comboChanged();
   $("#want-picker input")?.focus(); // keep typing to add more
 }
@@ -619,7 +670,7 @@ async function runComboSearch() {
     deepRelics: b.includeDeep ? c.relics.filter((r) => r.item.type === ItemType.DeepRelic) : [],
     enabledVessels: vessels,
     selectedEntries: [
-      ...b.wanted.map((e) => ({ effectKey: e.effectKey, minStacks: e.minStacks, maxStacks: e.maxStacks, weight: wantedWeight(e) })),
+      ...b.wanted.map((e) => ({ effectKey: e.effectKey, minStacks: e.minStacks, maxStacks: e.maxStacks, weight: wantedWeight(e), orBetter: orBetterFamily(state.gd, state.gd.effectByKey(e.effectKey)) })),
       ...b.avoid.filter((a) => a.block).map((a) => ({ effectKey: a.effectKey, minStacks: 0, maxStacks: 0 })),
     ],
     avoidEntries: b.avoid.filter((a) => !a.block).map((a) => ({ effectKey: a.effectKey, penalty: avoidPenaltyForRank(a.rank) })),
@@ -660,6 +711,12 @@ function renderCombo() {
   ensureBuild();
   const nf = nightfarer();
   const b = state.combo.build;
+  // Re-rendering replaces the columns; keep where each one was scrolled (the effects column only
+  // while it still shows the same build) so removing or changing an effect doesn't jump to the top.
+  const view = `${nf.id}:${b?.id ?? ""}`;
+  const keep = [...document.querySelectorAll(".combo > section:not(.results)")].map((el, i) => (i < 2 || state.combo.view === view ? el.scrollTop : 0));
+  const pageY = window.scrollY;
+  state.combo.view = view;
   $("#app").innerHTML = `<div class="combo">
     <section>
       <h3>I · Nightfarer</h3>
@@ -680,10 +737,12 @@ function renderCombo() {
   </div>`;
 
   if (b) {
-    effectPicker($("#want-picker"), { placeholder: "Add an effect you want…", getOptions: wantOptions, label: effectLabel, hint: notInRelicsHint, clearOnPick: true, onPick: addWanted });
+    effectPicker($("#want-picker"), { placeholder: "Add an effect you want…", getOptions: wantOptions, label: wantLabel, hint: notInRelicsHint, clearOnPick: true, onPick: addWanted });
     effectPicker($("#avoid-picker"), { placeholder: "Add a curse to avoid…", getOptions: avoidOptions, hint: notInRelicsHint, clearOnPick: true, onPick: addAvoid });
   }
   renderComboResults();
+  document.querySelectorAll(".combo > section:not(.results)").forEach((el, i) => { el.scrollTop = keep[i] ?? 0; });
+  if (keep.length) window.scrollTo(0, pageY); // narrow screens scroll the page instead of the columns
 }
 
 const nameForm = (value, label) => `<div class="name-row">
@@ -725,8 +784,18 @@ function buildColumn(nf, b) {
 
 function effectsEditor(b) {
   const nameOf = (k) => state.gd.effectByKey(k).name;
-  const wanted = [...b.wanted].sort((x, y) =>
-    (y.minStacks > 0) - (x.minStacks > 0) || (x.minStacks > 0 ? 0 : x.rank - y.rank) || nameOf(x.effectKey).localeCompare(nameOf(y.effectKey)));
+  const order = (x, y) =>
+    (y.minStacks > 0) - (x.minStacks > 0) || (x.minStacks > 0 ? 0 : x.rank - y.rank) || nameOf(x.effectKey).localeCompare(nameOf(y.effectKey));
+  // Strengths of a per-strength family share one card, placed by its most important strength
+  const cards = [];
+  const familyCards = new Map();
+  for (const entry of [...b.wanted].sort(order)) {
+    const e = state.gd.effectByKey(entry.effectKey);
+    if (!perStrength(state.gd, e)) { cards.push(wantedRow(entry)); continue; }
+    if (familyCards.has(e.group)) continue;
+    familyCards.set(e.group, true);
+    cards.push(familyCard(e));
+  }
   const avoid = [...b.avoid].sort((x, y) =>
     y.block - x.block || (x.block ? 0 : x.rank - y.rank) || nameOf(x.effectKey).localeCompare(nameOf(y.effectKey)));
   const required = b.wanted.filter((e) => e.minStacks > 0).length;
@@ -736,7 +805,7 @@ function effectsEditor(b) {
       <h4 class="ed-title">Wanted <small>${b.wanted.length ? `${required} required · ${b.wanted.length - required} ranked` : "none yet"}</small></h4>
       <div id="want-picker"></div>
       ${b.wanted.length
-        ? `<ul class="picked">${wanted.map(wantedRow).join("")}</ul>`
+        ? `<ul class="picked">${cards.join("")}</ul>`
         : `<p class="muted fine ed-help">Add the effects this build is after. Must-haves are <b>Required</b>; the rest are ranked from 1 (most important) to 12.</p>`}
     </div>
     <div class="ed-block avoid-block">
@@ -764,17 +833,68 @@ function priorityControl(entry) {
     <span>Priority</span>
     <select class="rank-select${required ? " is-required" : ""}" data-want-rank aria-label="Priority: Required, or 1 (highest) to 12">${options}</select>
     <span class="pips${required ? " req" : ""}" title="${title}">${pips}</span>
+    ${stackTag(state.gd.effectByKey(entry.effectKey))}
   </div>`;
+}
+
+const RANK_OPTIONS = (selected) => RANKS.map((r) => `<option value="${r}" ${r === selected ? "selected" : ""}>${rankName(r)}</option>`).join("");
+
+/** One card for a family whose strengths each add up but never stack with themselves: a priority per strength. */
+function familyCard(effect) {
+  const family = familyOf(state.gd, effect);
+  const b = state.combo.build;
+  const name = familyName(state.gd, effect);
+  const anyRequired = family.some((m) => b.wanted.some((w) => w.effectKey === m.key && w.minStacks > 0));
+  const rows = family.map((m) => {
+    const entry = b.wanted.find((w) => w.effectKey === m.key);
+    const value = !entry ? "" : entry.minStacks > 0 ? "req" : String(entry.rank);
+    const lit = !entry ? 0 : entry.minStacks > 0 ? MAX_RANK : MAX_RANK + 1 - entry.rank;
+    const pips = Array.from({ length: MAX_RANK }, (_, i) => `<i class="${i < lit ? "on" : ""}"></i>`).join("");
+    return `<div class="level-row${entry ? "" : " off"}${value === "req" ? " required" : ""}" data-level="${m.key}">
+      <span class="tick${inRelics(m) ? " own" : ""}" title="${esc(m.name)}${inRelics(m) ? "" : " (not on your relics)"}">${strengthTick(m)}</span>
+      <select class="rank-select${value === "req" ? " is-required" : ""}" data-level-rank aria-label="Priority for ${esc(m.name)}">
+        <option value="" ${value === "" ? "selected" : ""}>—</option>
+        <option value="req" ${value === "req" ? "selected" : ""}>Required</option>
+        ${RANK_OPTIONS(entry && value !== "req" ? entry.rank : -1)}
+      </select>
+      <span class="pips${value === "req" ? " req" : ""}">${pips}</span>
+    </div>`;
+  }).join("");
+  const missing = family.some(inRelics) ? "" : `<span class="note" title="None of ${esc(character().name)}'s relics have this">not owned</span>`;
+  return `<li class="family${anyRequired ? " required" : ""}" data-family="${effect.group}">
+    <div class="row"><span class="name">${esc(name)}</span>${missing}<button class="icon-btn" data-remove-family="${effect.group}" aria-label="Remove ${esc(name)}">✕</button></div>
+    <div class="opt-row"><span>Priority per strength</span><span class="stack-tag" title="Each strength is its own bonus: different strengths add up, a second copy of the same one does nothing">strengths stack</span></div>
+    <div class="level-rows">${rows}</div>
+  </li>`;
 }
 
 function wantedRow(entry) {
   const e = state.gd.effectByKey(entry.effectKey);
-  const missing = inRelics(e) ? "" : `<span class="note" title="None of ${esc(character().name)}'s relics have this">not owned</span>`;
+  const missing = owned(e) ? "" : `<span class="note" title="None of ${esc(character().name)}'s relics have this">not owned</span>`;
   return `<li data-entry="${e.key}" class="${entry.minStacks > 0 ? "required" : ""}">
-    <div class="row"><span class="name">${esc(effectLabel(e))}</span>${missing}<button class="icon-btn" data-remove="${e.key}" aria-label="Remove ${esc(e.name)}">✕</button></div>
+    <div class="row"><span class="name">${esc(wantLabel(e))}</span>${missing}<button class="icon-btn" data-remove="${e.key}" aria-label="Remove ${esc(e.name)}">✕</button></div>
     ${priorityControl(entry)}
-    ${e.stacks ? stackRange(entry, e) : ""}
+    ${orBetterFamily(state.gd, e) ? strengthControl(e) : ""}
+    ${stackRule(e).count ? stackRange(entry, e) : ""}
   </li>`;
+}
+
+const stackTag = (e) => { const r = stackRule(e); return `<span class="stack-tag${r.count ? "" : " no"}" title="${esc(r.title)}">${r.tag}</span>`; };
+const strengthTick = (m) => m.name.match(/\+\d+$/)?.[0] ?? "base";
+
+/** Minimum strength for a family: this level and every stronger one count. Ticks you own are lit. */
+function strengthControl(e) {
+  const family = familyOf(state.gd, e);
+  const at = family.indexOf(e);
+  const ownedTicks = family.filter(inRelics).map(strengthTick);
+  const label = at === 0 ? "any" : `${strengthTick(e)} or stronger`;
+  return `<div class="strength">
+    <div class="opt-row"><span>Strength</span><b class="lvl">${label}</b></div>
+    <div class="step-range" title="${esc(ownedTicks.length ? `On your relics: ${ownedTicks.join(", ")}` : "None of your relics have this")}">
+      <input type="range" min="0" max="${family.length - 1}" step="1" value="${at}" data-strength aria-label="Minimum strength" />
+      <div class="ticks">${family.map((m, i) => `<span class="${inRelics(m) ? "own" : ""}${i >= at ? " in" : ""}">${strengthTick(m)}</span>`).join("")}</div>
+    </div>
+  </div>`;
 }
 
 function stackRange(entry, e) {
@@ -783,9 +903,11 @@ function stackRange(entry, e) {
   const hi = Math.min(entry.maxStacks, max);
   const pct = (v) => (max === 0 ? 0 : (v / max) * 100);
   const reach = `<span class="muted">(you can reach ${max})</span>`;
+  // Effects that only stack across strengths count different strengths, not copies
+  const unit = stackRule(e).tag === "strengths stack" ? "Strengths" : "Stacks";
   const desc = max === 0 ? "None of your relics have this."
-    : entry.minStacks > 0 ? `Stacks: at least <b>${lo}</b>${hi > lo ? `, up to <b>${hi}</b>` : ""} ${reach}`
-    : `Stacks: up to <b>${hi}</b> ${reach}`;
+    : entry.minStacks > 0 ? `${unit}: at least <b>${lo}</b>${hi > lo ? `, up to <b>${hi}</b>` : ""} ${reach}`
+    : `${unit}: up to <b>${hi}</b> ${reach}`;
   return `<div class="dual-range" style="--max:${max}">
       <div class="track"></div>
       <div class="fill" style="left:calc(8px + (100% - 16px) * ${pct(lo) / 100});width:calc((100% - 16px) * ${(pct(hi) - pct(lo)) / 100})"></div>
@@ -892,24 +1014,30 @@ function comboGoals(combo, result) {
   const effects = combo.relics.flatMap((r, slot) => (!r || (slot >= 3 && result.excludeDeep) ? [] : r.effects.flat()));
   const nf = state.combo.nightfarer;
   const usable = effects.filter((e) => e.nightfarer === undefined || e.nightfarer === nf);
-  const matches = (effect, e) => e === effect || (effect.stacks && isSameGroupAndEqualOrBetter(effect, e));
+  const matches = (effect, e) => e === effect || ((effect.stacks || familyOf(state.gd, effect)) && isSameGroupAndEqualOrBetter(effect, e));
   const short = (e) => e.name.replace(/^\[[^\]]+\] /, "");
   const goals = result.entries.map((g) => {
-    const n = usable.filter((e) => matches(g.effect, e)).length;
+    const n = stackCount(g.effect, usable);
     const ok = n >= Math.max(1, g.minStacks);
     const optional = !ok && g.minStacks === 0; // nice-to-have that this combo doesn't include
     const cls = ok ? "ok" : optional ? "opt" : "miss";
-    return `<span class="goal ${cls}" title="${esc(g.effect.name)}${g.minStacks > 0 ? " (required)" : ""}">${ok ? "✓" : optional ? "○" : "✗"} ${esc(short(g.effect))}${g.effect.stacks && n > 1 ? ` ×${n}` : ""}</span>`;
+    const family = orBetterFamily(state.gd, g.effect) && familyOf(state.gd, g.effect);
+    const name = family ? `${familyName(state.gd, g.effect).replace(/^\[[^\]]+\] /, "")}${family[0] === g.effect ? "" : ` ≥${strengthTick(g.effect)}`}` : short(g.effect);
+    return `<span class="goal ${cls}" title="${esc(g.effect.name)}${family && family[0] !== g.effect ? " or stronger" : ""}${g.minStacks > 0 ? " (required)" : ""}">${ok ? "✓" : optional ? "○" : "✗"} ${esc(name)}${g.effect.stacks && n > 1 ? ` ×${n}` : ""}</span>`;
   });
   const avoided = result.avoided
     .map((a) => [a, effects.filter((e) => matches(a.effect, e)).length])
     .filter(([, n]) => n > 0)
     .map(([a, n]) => `<span class="goal avoid" title="Avoided: ${esc(a.effect.name)}">▽ ${esc(short(a.effect))}${n > 1 ? ` ×${n}` : ""}</span>`);
   const curses = effects.filter((e) => e.type === EffectType.Debuff && !result.avoided.some((a) => matches(a.effect, e)));
-  const curseChip = curses.length
-    ? `<span class="goal curse" title="${esc(curses.map((c) => c.name).join("\n"))}">⚠ ${curses.length} other curse${curses.length === 1 ? "" : "s"}</span>`
+  // Every curse by name (avoided ones are already listed above), with a count when one repeats
+  const counts = new Map();
+  for (const c of curses) counts.set(c, (counts.get(c) ?? 0) + 1);
+  const curseChips = [...counts].map(([c, n]) => `<span class="goal curse" title="Curse: ${esc(c.name)}">⚠ ${esc(c.name)}${n > 1 ? ` ×${n}` : ""}</span>`).join("");
+  const curseRow = curses.length
+    ? `<div class="goal-curses">${curseChips}</div>`
     : (result.excludeDeep || avoided.length ? "" : '<span class="goal ok">No curses</span>');
-  return goals.join("") + avoided.join("") + curseChip;
+  return goals.join("") + avoided.join("") + curseRow;
 }
 
 // ---------------------------------------------------------------------------
@@ -955,6 +1083,19 @@ function wireGlobalEvents() {
       }
       return comboChanged();
     }
+    if (t.matches("[data-level-rank]")) {
+      const key = Number(t.closest("[data-level]").dataset.level);
+      const b = state.combo.build;
+      let entry = b.wanted.find((w) => w.effectKey === key);
+      if (t.value === "") {
+        b.wanted = b.wanted.filter((w) => w.effectKey !== key);
+      } else {
+        if (!entry) b.wanted.push((entry = newWanted(state.gd, state.gd.effectByKey(key))));
+        if (t.value === "req") entry.minStacks = 1;
+        else { entry.rank = clampRank(t.value); entry.minStacks = 0; }
+      }
+      return comboChanged();
+    }
     if (t.matches("[data-avoid-rank]")) {
       const entry = avoidEntry(t);
       entry.block = t.value === "block";
@@ -963,6 +1104,7 @@ function wireGlobalEvents() {
     }
     // Re-sort once a stack slider is let go: it may have switched between required and ranked
     if (t.dataset.range) return renderCombo();
+    if (t.matches("[data-strength]")) return comboChanged();
     if (t.name === "nf") {
       state.combo.nightfarer = Number(t.value);
       state.combo.build = null;
@@ -980,11 +1122,26 @@ function wireGlobalEvents() {
 
   document.addEventListener("input", (ev) => {
     const t = ev.target;
+    if (t.matches("[data-strength]")) {
+      // Swap the entry to the chosen strength; the card re-renders when the slider is let go
+      const li = t.closest("[data-entry]");
+      const entry = wantedEntry(t);
+      const family = familyOf(state.gd, state.gd.effectByKey(entry.effectKey));
+      Object.assign(entry, fitStacks(state.gd, { ...entry, effectKey: family[Number(t.value)].key }));
+      li.dataset.entry = entry.effectKey;
+      const fresh = document.createElement("div");
+      fresh.innerHTML = strengthControl(state.gd.effectByKey(entry.effectKey));
+      li.querySelector(".strength .lvl").replaceWith(fresh.querySelector(".lvl"));
+      li.querySelector(".strength .ticks").replaceWith(fresh.querySelector(".ticks"));
+      return comboChanged({ rerender: false });
+    }
     if (!t.dataset.range) return;
     const li = t.closest("[data-entry]");
     const entry = wantedEntry(t);
     const [minEl, maxEl] = li.querySelectorAll("input[type=range]");
     let lo = Number(minEl.value), hi = Number(maxEl.value);
+    // A wanted effect allows at least 1 copy; ruling an effect out is what the Avoid list is for
+    if (hi < 1 && Number(maxEl.max) >= 1) { hi = 1; maxEl.value = 1; }
     if (lo > hi) {
       if (t === minEl) hi = lo; else lo = hi;
       minEl.value = lo; maxEl.value = hi;
@@ -1027,6 +1184,10 @@ function wireGlobalEvents() {
     }
     if (t.dataset.remove) {
       b.wanted = b.wanted.filter((e) => e.effectKey !== Number(t.dataset.remove));
+      return comboChanged();
+    }
+    if (t.dataset.removeFamily) {
+      b.wanted = b.wanted.filter((w) => state.gd.effectByKey(w.effectKey).group !== Number(t.dataset.removeFamily) || !perStrength(state.gd, state.gd.effectByKey(w.effectKey)));
       return comboChanged();
     }
     if (t.dataset.removeAvoid) {

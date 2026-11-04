@@ -37,7 +37,11 @@ leaves your PC: the server only answers on localhost.
 - **Combo Finder**: pick a Nightfarer, then one of their builds, to get the 50 best loadouts across all of
   their vessels.
   - Builds can be created, renamed, duplicated and deleted, and every edit saves on its own.
-  - Wanted effects are **Required** or ranked 1 to 12. Stackable effects also get a stack range.
+  - Wanted effects are **Required** or ranked 1 to 12. Each card says how the effect stacks.
+  - Stacking effects that come in strengths (Physical Attack Up, +1 … +4) are one entry with a **Strength**
+    slider (the minimum level; stronger ones count too) and a stack range.
+  - Effects whose strengths add up but never stack with themselves (Defeating enemies fills more of the Art
+    gauge, +1, +2) get a priority per strength. A second copy of the same strength counts once.
   - Avoided effects (usually curses) are **Blocked** or avoided with a rank 1 to 12, plus a penalty for
     curses that aren't listed.
   - Goal checklist on each result.
@@ -59,6 +63,10 @@ npm run update-data      # refresh item/effect data after a game patch
 ```
 
 ## Credits
+
+Which effects stack follows the community
+[relic stacking sheet](https://docs.google.com/spreadsheets/d/1meXOw4jR1hh7YXVMeijWwSDIXnCw6Tk4hTZPq2qvyK4)
+(`public/data/stacking.json` holds the corrections to the game data, and best guesses for MMV effects).
 
 Save-format research and game data come from
 [RelicBrowser](https://github.com/metinc/nightreign-relic-browser) by Metin Çelik (MIT, see
