@@ -217,7 +217,6 @@ function renderWelcome() {
   renderStatus();
   const where = state.saveRoot ? `<code>${esc(state.saveRoot)}\\&lt;SteamID&gt;\\NR0000.sl2</code>` : "<code>%APPDATA%\\Nightreign\\&lt;SteamID&gt;\\NR0000.sl2</code>";
   $("#app").innerHTML = `<section class="welcome">
-    <h1>Your relics, outside the game</h1>
     <p class="flourish">✦ ✦ ✦</p>
     <p class="lede">${state.noServer ? "Open your save file to get started." : "No Nightreign save was found automatically."} Your save lives at ${where}.</p>
     <div class="actions">
